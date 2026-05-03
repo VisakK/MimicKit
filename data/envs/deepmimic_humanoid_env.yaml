@@ -34,7 +34,7 @@ env:
     # tracking reward, with cot = sum(|tau_i * dq_i|) / (m * g * v). `v` is
     # clamped from below by reward_cot_min_speed (m/s) to avoid divide-by-
     # zero when the character is near rest.
-    reward_cot_w: 0.0
+    reward_cot_w: 0.2
     reward_cot_scale: 0.5
     reward_cot_min_speed: 0.5
 
@@ -44,7 +44,7 @@ env:
     # and adds reward_vert_impulse_w * exp(-scale * I_peak) to the tracking
     # reward, where I_peak is the peak across feet. The threshold (N) gates
     # contact detection and should sit well above sensor noise.
-    reward_vert_impulse_w: 0.0
+    reward_vert_impulse_w: 0.2
     reward_vert_impulse_scale: 0.01
     reward_vert_impulse_threshold: 50.0
     vert_impulse_penalty_bodies: ["right_foot", "left_foot"]
