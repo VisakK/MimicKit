@@ -1,6 +1,7 @@
+import atexit
 import numpy as np
+import os
 import torch
-
 import anim.motion as motion
 import anim.motion_lib as motion_lib
 import envs.base_env as base_env
@@ -25,7 +26,12 @@ class DeepMimicEnv(char_env.CharEnv):
         
         self._ref_char_offset = torch.tensor(env_config["ref_char_offset"], device=device, dtype=torch.float)
         self._log_tracking_error = env_config.get("log_tracking_error", False)
-        
+        self._log_ground_contact_forces = env_config.get("log_ground_contact_forces", False)
+        self._log_joint_torques = env_config.get("log_joint_torques", False)
+        self._log_dir = env_config.get("log_dir", "output/diagnostics")
+        self._log_tag = env_config.get("log_tag", "run")
+        self._log_save_interval = env_config.get("log_save_interval", 100)
+
         self._reward_pose_w = env_config.get("reward_pose_w")
         self._reward_vel_w = env_config.get("reward_vel_w")
         self._reward_root_pose_w = env_config.get("reward_root_pose_w")
@@ -37,7 +43,34 @@ class DeepMimicEnv(char_env.CharEnv):
         self._reward_root_pose_scale = env_config.get("reward_root_pose_scale")
         self._reward_root_vel_scale = env_config.get("reward_root_vel_scale")
         self._reward_key_pos_scale = env_config.get("reward_key_pos_scale")
-        
+
+        # Foot-strike impulse penalty (set weight to 0 to disable).
+        self._reward_impulse_w = env_config.get("reward_impulse_w", 0.0)
+        self._reward_impulse_scale = env_config.get("reward_impulse_scale", 1e-5)
+        self._reward_impulse_threshold = env_config.get("reward_impulse_threshold", 50.0)
+        self._impulse_penalty_bodies = env_config.get("impulse_penalty_bodies",
+                                                      ["right_foot", "left_foot"])
+
+        # Metabolic cost-of-transport bonus (set weight to 0 to disable). Adds
+        # an additive term reward_cot_w * exp(-reward_cot_scale * cot) to the
+        # tracking reward, where cot = sum(|tau_i * dq_i|) / (m * g * v).
+        # `v` is the horizontal speed of the root, clamped from below by
+        # reward_cot_min_speed to avoid blowups when the agent is near rest.
+        self._reward_cot_w = env_config.get("reward_cot_w", 0.0)
+        self._reward_cot_scale = env_config.get("reward_cot_scale", 0.5)
+        self._reward_cot_min_speed = env_config.get("reward_cot_min_speed", 0.5)
+
+        # Vertical-impulse penalty (set weight to 0 to disable). Integrates
+        # the per-foot vertical GRF over each ground-contact bout (heel-strike
+        # to toe-off; accumulator resets at the next heel-strike). The peak
+        # across feet is mapped through exp(-scale * I) and added to the
+        # tracking reward with weight reward_vert_impulse_w.
+        self._reward_vert_impulse_w = env_config.get("reward_vert_impulse_w", 0.0)
+        self._reward_vert_impulse_scale = env_config.get("reward_vert_impulse_scale", 0.01)
+        self._reward_vert_impulse_threshold = env_config.get("reward_vert_impulse_threshold", 50.0)
+        self._vert_impulse_penalty_bodies = env_config.get("vert_impulse_penalty_bodies",
+                                                            ["right_foot", "left_foot"])
+
         self._visualize_ref_char = env_config.get("visualize_ref_char", True)
         
         super().__init__(config=config, num_envs=num_envs, device=device,
@@ -56,9 +89,28 @@ class DeepMimicEnv(char_env.CharEnv):
     def set_mode(self, mode):
         super().set_mode(mode)
 
+        if (self._mode == base_env.EnvMode.TRAIN):
+            # Reset the per-iter reward-term tracker at the start of each
+            # train rollout so its averages reflect only this iteration's
+            # data (which is what the policy update actually consumed).
+            if (hasattr(self, "_reward_term_tracker")):
+                self._reward_term_tracker.reset()
+
         if (self._mode == base_env.EnvMode.TEST):
             if (self._log_tracking_error):
                 self._error_tracker.reset()
+
+            # Reset accumulated logs every time we re-enter test mode and
+            # arrange to flush them on process exit so users can Ctrl-C safely.
+            self._ground_contact_forces_log = []
+            self._joint_torques_log = []
+            self._dof_pos_log = []
+            self._time_log = []
+            self._log_step_count = 0
+            if (self._log_ground_contact_forces or self._log_joint_torques) \
+                    and not self._log_atexit_registered:
+                atexit.register(self._save_logs)
+                self._log_atexit_registered = True
 
         return
 
@@ -93,9 +145,32 @@ class DeepMimicEnv(char_env.CharEnv):
         contact_bodies = env_config.get("contact_bodies", [])
         self._contact_body_ids = self._build_body_ids_tensor(contact_bodies)
 
+        # Bodies whose foot-strike impulse we penalize when reward_impulse_w > 0.
+        self._impulse_body_ids = self._build_body_ids_tensor(self._impulse_penalty_bodies)
+        num_envs = self.get_num_envs()
+        self._prev_contact_force_z = torch.zeros([num_envs, len(self._impulse_body_ids)],
+                                                 device=self._device, dtype=torch.float32)
+        self._step_impulse_penalty = torch.zeros([num_envs], device=self._device, dtype=torch.float32)
+
+        # Per-bout vertical-impulse accumulator. Each entry integrates F_z*dt
+        # while the foot is in contact and is reset on the next heel-strike.
+        self._vert_impulse_body_ids = self._build_body_ids_tensor(self._vert_impulse_penalty_bodies)
+        self._curr_bout_vert_impulse = torch.zeros(
+            [num_envs, len(self._vert_impulse_body_ids)],
+            device=self._device, dtype=torch.float32)
+        self._prev_vert_impulse_in_contact = torch.zeros(
+            [num_envs, len(self._vert_impulse_body_ids)],
+            device=self._device, dtype=torch.bool)
+
+        # Cache m*g for the cost-of-transport reward. Assumes all envs share
+        # the same character (true today since char_file is global), so a
+        # single scalar covers every env.
+        char_mass = float(self._engine.calc_obj_mass(0, char_id))
+        self._char_weight = char_mass * 9.81
+
         joint_err_w = env_config.get("joint_err_w", None)
         self._parse_joint_err_weights(joint_err_w)
-        
+
         return
 
     def _load_motions(self, motion_file):
@@ -143,6 +218,19 @@ class DeepMimicEnv(char_env.CharEnv):
 
         if (self._enable_ref_char()):
             self._reset_ref_char(env_ids)
+
+        # Treat post-reset feet as already in contact so the first step does
+        # not fire a spurious strike event in the impulse penalty.
+        if (hasattr(self, "_prev_contact_force_z") and self._impulse_body_ids.shape[0] > 0):
+            self._prev_contact_force_z[env_ids] = 1.0e6
+
+        # Reset the per-bout vertical-impulse accumulator. Marking the foot
+        # as already in contact suppresses a spurious heel-strike event on
+        # the first post-reset step.
+        if (hasattr(self, "_curr_bout_vert_impulse")
+                and self._vert_impulse_body_ids.shape[0] > 0):
+            self._curr_bout_vert_impulse[env_ids] = 0.0
+            self._prev_vert_impulse_in_contact[env_ids] = True
 
         return
 
@@ -285,6 +373,21 @@ class DeepMimicEnv(char_env.CharEnv):
             num_track_errors = 7
             self._error_tracker = stats_tracker.StatsTracker(num_track_errors, device=self._device)
 
+        # Per-step diagnostic logs. Each is a list of CPU tensors that gets
+        # stacked along time when flushed to disk.
+        self._ground_contact_forces_log = []
+        self._joint_torques_log = []
+        self._dof_pos_log = []
+        self._time_log = []
+        self._log_step_count = 0
+        self._log_atexit_registered = False
+
+        # Iter-level reward-term means. Accumulates per-step means during
+        # train rollouts and is published into _diagnostics by
+        # get_diagnostics() (which the agent calls once per iter at log
+        # time). Lets wandb show reward_term/pose_r, reward_term/cot, ...
+        self._reward_term_tracker = _RewardTermTracker(self._device)
+
         return
     
     def _build_envs(self, config, num_envs):
@@ -422,40 +525,164 @@ class DeepMimicEnv(char_env.CharEnv):
 
         track_root_h = self._root_height_obs
         track_root = self._track_global_root()
-        
-        self._reward_buf[:] = compute_reward(root_pos=root_pos,
-                                             root_rot=root_rot,
-                                             root_vel=root_vel,
-                                             root_ang_vel=root_ang_vel,
-                                             joint_rot=joint_rot,
-                                             dof_vel=dof_vel,
-                                             key_pos=key_pos,
-                                             
-                                             tar_root_pos=self._ref_root_pos,
-                                             tar_root_rot=self._ref_root_rot,
-                                             tar_root_vel=self._ref_root_vel,
-                                             tar_root_ang_vel=self._ref_root_ang_vel,
-                                             tar_joint_rot=self._ref_joint_rot,
-                                             tar_dof_vel=self._ref_dof_vel,
-                                             tar_key_pos=ref_key_pos,
-                                             
-                                             joint_rot_err_w=self._joint_err_w,
-                                             dof_err_w=self._dof_err_w,
-                                             track_root_h=track_root_h,
-                                             track_root=track_root,               
-                                             
-                                             pose_w=self._reward_pose_w,
-                                             vel_w=self._reward_vel_w,
-                                             root_pose_w=self._reward_root_pose_w,
-                                             root_vel_w=self._reward_root_vel_w,
-                                             key_pos_w=self._reward_key_pos_w,
 
-                                             pose_scale=self._reward_pose_scale,
-                                             vel_scale=self._reward_vel_scale,
-                                             root_pose_scale=self._reward_root_pose_scale,
-                                             root_vel_scale=self._reward_root_vel_scale,
-                                             key_pos_scale=self._reward_key_pos_scale)
+        r, pose_r, vel_r, root_pose_r, root_vel_r, key_pos_r = compute_reward(
+            root_pos=root_pos,
+            root_rot=root_rot,
+            root_vel=root_vel,
+            root_ang_vel=root_ang_vel,
+            joint_rot=joint_rot,
+            dof_vel=dof_vel,
+            key_pos=key_pos,
+
+            tar_root_pos=self._ref_root_pos,
+            tar_root_rot=self._ref_root_rot,
+            tar_root_vel=self._ref_root_vel,
+            tar_root_ang_vel=self._ref_root_ang_vel,
+            tar_joint_rot=self._ref_joint_rot,
+            tar_dof_vel=self._ref_dof_vel,
+            tar_key_pos=ref_key_pos,
+
+            joint_rot_err_w=self._joint_err_w,
+            dof_err_w=self._dof_err_w,
+            track_root_h=track_root_h,
+            track_root=track_root,
+
+            pose_w=self._reward_pose_w,
+            vel_w=self._reward_vel_w,
+            root_pose_w=self._reward_root_pose_w,
+            root_vel_w=self._reward_root_vel_w,
+            key_pos_w=self._reward_key_pos_w,
+
+            pose_scale=self._reward_pose_scale,
+            vel_scale=self._reward_vel_scale,
+            root_pose_scale=self._reward_root_pose_scale,
+            root_vel_scale=self._reward_root_vel_scale,
+            key_pos_scale=self._reward_key_pos_scale)
+        self._reward_buf[:] = r
+
+        # Per-step reward components for the iter-average tracker. Optional
+        # add-on terms (cot_r, vert_impulse_r) are appended below if active.
+        reward_components = {
+            "pose_r": pose_r,
+            "vel_r": vel_r,
+            "root_pose_r": root_pose_r,
+            "root_vel_r": root_vel_r,
+            "key_pos_r": key_pos_r,
+        }
+
+        # Cache GRF once if any GRF-dependent term is active.
+        ground_contact_forces = None
+        need_gcf = (self._reward_vert_impulse_w > 0.0 and self._vert_impulse_body_ids.shape[0] > 0) \
+                   or (self._reward_impulse_w > 0.0 and self._impulse_body_ids.shape[0] > 0)
+        if (need_gcf):
+            ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
+
+        if (self._reward_cot_w > 0.0):
+            self._reward_buf[:], cot, cot_r = self._apply_cot_reward(self._reward_buf,
+                                                                      char_id, root_vel, dof_vel)
+            reward_components["cot"] = cot
+            reward_components["cot_r"] = cot_r
+
+        if (self._reward_vert_impulse_w > 0.0 and self._vert_impulse_body_ids.shape[0] > 0):
+            self._reward_buf[:], peak_imp, vert_impulse_r = self._apply_vert_impulse_penalty(
+                self._reward_buf, ground_contact_forces)
+            reward_components["vert_impulse_peak"] = peak_imp
+            reward_components["vert_impulse_r"] = vert_impulse_r
+
+        if (self._reward_impulse_w > 0.0 and self._impulse_body_ids.shape[0] > 0):
+            self._reward_buf[:], strike_imp = self._apply_impulse_penalty(
+                self._reward_buf, ground_contact_forces)
+            reward_components["foot_strike_impulse"] = strike_imp
+
+        # Total weighted reward (post all transformations) for inspection.
+        reward_components["reward_total"] = self._reward_buf
+
+        # Accumulate iter-level reward-term means across the train rollout.
+        # The tracker is reset on set_mode(TRAIN), and its means are pulled
+        # by get_diagnostics at log time. Test-rollout steps are skipped so
+        # the published numbers reflect the data the policy was trained on.
+        if (self._mode == base_env.EnvMode.TRAIN):
+            self._reward_term_tracker.update(reward_components)
+
         return
+
+    def _apply_cot_reward(self, reward_buf, char_id, root_vel, dof_vel):
+        # Approximate metabolic Cost of Transport as
+        #   cot = sum(|tau_i * dq_i|) / (m * g * v),
+        # with v the horizontal-plane root speed clamped from below to avoid
+        # divide-by-zero when the character is near rest. The reward is
+        # exp(-scale * cot) (in [0, 1]) added to the existing tracking reward.
+        # Returns (new_reward, cot, cot_r) so the caller can feed `cot` and
+        # `cot_r` into the iter-average reward-term tracker.
+        dof_torques = self._engine.get_dof_forces(char_id)
+        mech_power = torch.sum(torch.abs(dof_torques * dof_vel), dim=-1)
+
+        horiz_speed = torch.linalg.vector_norm(root_vel[..., :2], dim=-1)
+        horiz_speed = torch.clamp(horiz_speed, min=self._reward_cot_min_speed)
+
+        cot = mech_power / (self._char_weight * horiz_speed)
+        cot_r = torch.exp(-self._reward_cot_scale * cot)
+
+        return reward_buf + self._reward_cot_w * cot_r, cot, cot_r
+
+    def _apply_vert_impulse_penalty(self, reward_buf, ground_contact_forces):
+        # Maintain a per-foot accumulator for the integral of F_z * dt across
+        # the current ground-contact bout. The accumulator resets at heel-
+        # strike (false->true contact transition) and stays put while the
+        # foot is in flight, so the most recent bout's impulse is held until
+        # the next heel-strike. Penalty signal at every step is the peak
+        # across feet, mapped through exp(-scale * I). Returns (new_reward,
+        # peak_impulse, vert_impulse_r) for the iter-average tracker.
+        foot_force_z = ground_contact_forces[:, self._vert_impulse_body_ids, 2]
+        in_contact = foot_force_z >= self._reward_vert_impulse_threshold
+
+        heel_strike = torch.logical_and(~self._prev_vert_impulse_in_contact, in_contact)
+        self._curr_bout_vert_impulse = torch.where(
+            heel_strike,
+            torch.zeros_like(self._curr_bout_vert_impulse),
+            self._curr_bout_vert_impulse)
+
+        dt = self._engine.get_timestep()
+        increment = torch.where(in_contact, foot_force_z * dt,
+                                torch.zeros_like(foot_force_z))
+        self._curr_bout_vert_impulse = self._curr_bout_vert_impulse + increment
+
+        self._prev_vert_impulse_in_contact = in_contact.detach().clone()
+
+        peak_impulse = torch.max(self._curr_bout_vert_impulse, dim=-1)[0]
+        vert_impulse_r = torch.exp(-self._reward_vert_impulse_scale * peak_impulse)
+
+        return (reward_buf + self._reward_vert_impulse_w * vert_impulse_r,
+                peak_impulse, vert_impulse_r)
+
+    def _apply_impulse_penalty(self, reward_buf, ground_contact_forces):
+        # Detect a foot strike as a low->high transition in vertical GRF, then
+        # penalize the magnitude of the GRF spike at the transition. Keeping the
+        # detection event-based (rather than a per-step force penalty) keeps the
+        # signal aligned with the biomechanical notion of impulse at impact.
+        foot_forces = ground_contact_forces[:, self._impulse_body_ids, :]
+        foot_force_z = foot_forces[..., 2]
+
+        thresh = self._reward_impulse_threshold
+        prev_below = self._prev_contact_force_z < thresh
+        curr_above = foot_force_z >= thresh
+        strike = torch.logical_and(prev_below, curr_above)
+
+        force_mag = torch.linalg.vector_norm(foot_forces, dim=-1)
+        impulse_mag = torch.where(strike, force_mag, torch.zeros_like(force_mag))
+        # Sum across feet so a double-strike still gets penalized.
+        per_env_impulse = impulse_mag.sum(dim=-1)
+
+        impulse_r = torch.exp(-self._reward_impulse_scale * per_env_impulse)
+        # Convex blend: shave off some of the tracking reward proportional to
+        # how violent the strike was, normalized by reward_impulse_w.
+        blended = (1.0 - self._reward_impulse_w) * reward_buf \
+                  + self._reward_impulse_w * impulse_r * reward_buf
+
+        self._prev_contact_force_z = foot_force_z.detach().clone()
+        self._step_impulse_penalty = per_env_impulse.detach().clone()
+        return blended, per_env_impulse
 
     def _update_done(self):
         motion_times = self._get_motion_times()
@@ -469,6 +696,17 @@ class DeepMimicEnv(char_env.CharEnv):
         root_rot = self._engine.get_root_rot(char_id)
         body_pos = self._engine.get_body_pos(char_id)
         ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
+
+        ground_contact_tensor = torch.stack((self._ground_contact_forces_log), dim=0) if self._log_ground_contact_forces else None
+
+        # log this tensor 
+        # torch.save(ground_contact_tensor, "./mimickit/ground_contact_forces_log_run.pt")
+        body_names = self._kin_char_model.get_body_names()
+        # if self._contact_body_ids.shape[0] > 0:
+        #     contact_body_names = [body_names[i] for i in self._contact_body_ids]
+        #     masked_contact_buf = ground_contact_forces.detach().clone()
+        #     masked_contact_buf[:, self._contact_body_ids, :] = 0
+        #     print(f"contact_body_names: {contact_body_names}")
 
         self._done_buf[:] = compute_done(done_buf=self._done_buf,
                                          time=self._time_buf, 
@@ -486,17 +724,39 @@ class DeepMimicEnv(char_env.CharEnv):
                                          motion_times=motion_times,
                                          motion_len=motion_len,
                                          motion_len_term=motion_len_term,
-                                         track_root=track_root)
+                                         track_root=track_root,)
         return
 
     def _update_info(self, env_ids=None):
         super()._update_info(env_ids)
-        
+
         if (self._mode == base_env.EnvMode.TEST):
             if (self._log_tracking_error):
                 self._record_tracking_error(env_ids)
+            if (self._log_ground_contact_forces):
+                self._record_ground_contact_forces(env_ids)
+            if (self._log_joint_torques):
+                self._record_joint_torques(env_ids)
+
+            if (self._log_ground_contact_forces or self._log_joint_torques):
+                self._time_log.append(self._time_buf.detach().clone().cpu())
+                self._log_step_count += 1
+                if (self._log_save_interval > 0
+                        and self._log_step_count % self._log_save_interval == 0):
+                    self._save_logs()
 
         return
+
+    def get_diagnostics(self):
+        # Publish per-iter reward-term means (then reset the tracker so the
+        # next iter accumulates afresh). The agent calls this once per iter
+        # at log time, so this is a natural read-with-reset boundary.
+        if (hasattr(self, "_reward_term_tracker")
+                and self._reward_term_tracker.has_data()):
+            for k, v in self._reward_term_tracker.get_means().items():
+                self._diagnostics["reward_term/{}".format(k)] = v
+            self._reward_term_tracker.reset()
+        return self._diagnostics
     
     def _record_tracking_error(self, env_ids=None):
         if (env_ids is None or len(env_ids) > 0):
@@ -568,6 +828,68 @@ class DeepMimicEnv(char_env.CharEnv):
 
         return
     
+    def _record_ground_contact_forces(self, env_ids=None):
+        if (env_ids is None or len(env_ids) > 0):
+            char_id = self._get_char_id()
+            # Per-body ground contact forces in [num_envs, num_bodies, 3].
+            ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
+            self._ground_contact_forces_log.append(ground_contact_forces.detach().clone().cpu())
+            self._diagnostics["ground_contact_forces"] = ground_contact_forces
+
+        return
+
+    def _record_joint_torques(self, env_ids=None):
+        if (env_ids is None or len(env_ids) > 0):
+            char_id = self._get_char_id()
+            dof_torques = self._engine.get_dof_forces(char_id)
+            dof_pos = self._engine.get_dof_pos(char_id)
+            self._joint_torques_log.append(dof_torques.detach().clone().cpu())
+            self._dof_pos_log.append(dof_pos.detach().clone().cpu())
+            self._diagnostics["dof_torques"] = dof_torques
+        return
+
+    def _save_logs(self):
+        # Best-effort flush of accumulated diagnostic logs to disk. Safe to call
+        # repeatedly (it overwrites the same file).
+        if (len(self._ground_contact_forces_log) == 0
+                and len(self._joint_torques_log) == 0):
+            return
+
+        try:
+            os.makedirs(self._log_dir, exist_ok=True)
+        except Exception:
+            return
+
+        body_names = self._kin_char_model.get_body_names()
+        dof_names = []
+        for j in range(1, self._kin_char_model.get_num_joints()):
+            joint = self._kin_char_model.get_joint(j)
+            dim = joint.get_dof_dim()
+            if (dim == 1):
+                dof_names.append(joint.name)
+            else:
+                for axis in range(dim):
+                    dof_names.append("{}_{}".format(joint.name, axis))
+
+        payload = {
+            "body_names": body_names,
+            "dof_names": dof_names,
+            "control_freq": self._engine.get_control_freq() if hasattr(self._engine, "get_control_freq") else None,
+            "timestep": self._engine.get_timestep() if hasattr(self._engine, "get_timestep") else None,
+        }
+        if (len(self._ground_contact_forces_log) > 0):
+            payload["ground_contact_forces"] = torch.stack(self._ground_contact_forces_log, dim=0)
+        if (len(self._joint_torques_log) > 0):
+            payload["joint_torques"] = torch.stack(self._joint_torques_log, dim=0)
+        if (len(self._dof_pos_log) > 0):
+            payload["dof_pos"] = torch.stack(self._dof_pos_log, dim=0)
+        if (len(self._time_log) > 0):
+            payload["time"] = torch.stack(self._time_log, dim=0)
+
+        out_path = os.path.join(self._log_dir, "diagnostics_{}.pt".format(self._log_tag))
+        torch.save(payload, out_path)
+        return
+    
     def _fetch_tar_obs_data(self, motion_ids, motion_times):
         n = motion_ids.shape[0]
         num_steps = self._tar_obs_steps.shape[0]
@@ -581,11 +903,53 @@ class DeepMimicEnv(char_env.CharEnv):
         motion_ids_tiled = motion_ids_tiled.flatten()
         motion_times = motion_times.flatten()
         root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel = self._motion_lib.calc_motion_frame(motion_ids_tiled, motion_times)
-        
+
         root_pos = root_pos.reshape([n, num_steps, root_pos.shape[-1]])
         root_rot = root_rot.reshape([n, num_steps, root_rot.shape[-1]])
         joint_rot = joint_rot.reshape([n, num_steps, joint_rot.shape[-2], joint_rot.shape[-1]])
         return root_pos, root_rot, joint_rot
+
+
+class _RewardTermTracker:
+    """Accumulates per-step batch means of reward components across one
+    training rollout, then exposes the across-step means at iter end. Each
+    update call takes a dict of {name: tensor[num_envs]} and folds in that
+    step's batch mean. Reset clears all accumulators back to zero/empty.
+    """
+
+    def __init__(self, device):
+        self._device = device
+        self._sums = {}
+        self._count = 0
+        return
+
+    def reset(self):
+        # Clear the dict (not just zero it) so the next iter publishes only
+        # the keys that were actually updated, even if the active reward
+        # weights changed mid-run.
+        self._sums = {}
+        self._count = 0
+        return
+
+    def has_data(self):
+        return self._count > 0
+
+    def update(self, components):
+        for k, v in components.items():
+            if (not torch.is_tensor(v)):
+                continue
+            mean_step = v.detach().float().mean()
+            if (k not in self._sums):
+                self._sums[k] = torch.zeros((), device=self._device, dtype=torch.float32)
+            self._sums[k] = self._sums[k] + mean_step
+        self._count += 1
+        return
+
+    def get_means(self):
+        if (self._count == 0):
+            return {}
+        denom = float(self._count)
+        return {k: (s / denom).item() for k, s in self._sums.items()}
 
 
 @torch.jit.script
@@ -746,11 +1110,8 @@ def compute_done(done_buf, time, ep_len, root_rot, body_pos, tar_root_rot, tar_b
 
     if (enable_early_termination):
         failed = torch.zeros(done.shape, device=done.device, dtype=torch.bool)
-
         if (contact_body_ids.shape[0] > 0):
-            masked_contact_buf = ground_contact_force.detach().clone()
-            masked_contact_buf[:, contact_body_ids, :] = 0
-            fall_contact = torch.any(torch.abs(masked_contact_buf) > 0.1, dim=-1)
+            fall_contact = torch.any(torch.abs(ground_contact_force[:, contact_body_ids, :]) > 0.1, dim=-1)
 
             has_fallen = torch.any(fall_contact, dim=-1)
             failed = torch.logical_or(failed, has_fallen)
@@ -797,7 +1158,7 @@ def compute_reward(root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_ve
                    joint_rot_err_w, dof_err_w, track_root_h, track_root,
                    pose_w, vel_w, root_pose_w, root_vel_w, key_pos_w,
                    pose_scale, vel_scale, root_pose_scale, root_vel_scale, key_pos_scale):
-    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, bool, bool, float, float, float, float, float, float, float, float, float, float) -> Tensor
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, bool, bool, float, float, float, float, float, float, float, float, float, float) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
     pose_diff = torch_util.quat_diff_angle(joint_rot, tar_joint_rot)
     pose_err = torch.sum(joint_rot_err_w * pose_diff * pose_diff, dim=-1)
 
@@ -850,7 +1211,7 @@ def compute_reward(root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_ve
         + root_vel_w * root_vel_r \
         + key_pos_w * key_pos_r
 
-    return r
+    return r, pose_r, vel_r, root_pose_r, root_vel_r, key_pos_r
 
 @torch.jit.script
 def compute_tracking_error(root_pos, root_rot, body_rot, body_pos,

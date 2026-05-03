@@ -14,7 +14,7 @@ env:
 
 
 engine:
-    engine_name: "isaac_gym"
+    engine_name: "isaac_lab"
     
     control_mode: "none"
     sim_freq: 30

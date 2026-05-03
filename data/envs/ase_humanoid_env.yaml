@@ -39,7 +39,7 @@ env:
 
 
 engine:
-    engine_name: "isaac_gym"
+    engine_name: "isaac_lab"
     
     control_mode: "pos"
     control_freq: 30

@@ -60,16 +60,22 @@ class BaseAgent(torch.nn.Module):
 
         while self._sample_count < max_samples:
             train_info = self._train_iter()
-            
+
             self._sample_count = self._update_sample_count()
             output_iter = (self._iter % self._iters_per_output == 0) or (self._sample_count >= max_samples)
 
             if (output_iter):
                 test_info = self.test_model(self._test_episodes)
-            
+
             env_diag_info = self._env.get_diagnostics()
-            self._log_train_info(train_info, test_info, env_diag_info, start_time) 
+            self._log_train_info(train_info, test_info, env_diag_info, start_time)
             self._logger.print_log()
+
+            # Save the latest checkpoint every iteration so a killed training
+            # run does not lose all progress since the last iters_per_output
+            # boundary. The numbered snapshots in int_output_dir stay gated.
+            if (out_model_file != ""):
+                self.save(out_model_file)
 
             if (output_iter):
                 self._logger.write_log()
@@ -77,7 +83,7 @@ class BaseAgent(torch.nn.Module):
 
                 self._train_return_tracker.reset()
                 self._curr_obs, self._curr_info = self._reset_envs()
-            
+
             self._iter += 1
 
         return
@@ -396,10 +402,22 @@ class BaseAgent(torch.nn.Module):
             self._logger.log(val_name, v)
 
         for k, v in env_diag_info.items():
-            val_name = k.title()
             if torch.is_tensor(v):
-                v = v.item()
-            self._logger.log(val_name, v, collection="2_Env", quiet=True)
+                # Scalarize. Per-env diagnostics are usually [num_envs] (or
+                # [num_envs, ...]) tensors; logging the batch mean is the
+                # least-surprising default.
+                v = v.detach().float().mean().item() if v.numel() > 1 else v.item()
+            # Group reward-component means under their own collection so
+            # wandb renders them in a coherent panel separate from raw
+            # diagnostics. The `reward_term/` prefix is dropped because the
+            # collection name already provides the grouping.
+            if k.startswith("reward_term/"):
+                val_name = k[len("reward_term/"):].title()
+                collection = "3_RewardTerms"
+            else:
+                val_name = k.title()
+                collection = "2_Env"
+            self._logger.log(val_name, v, collection=collection, quiet=True)
         
         obs_norm_mean = self._obs_norm.get_mean()
         obs_norm_std = self._obs_norm.get_std()

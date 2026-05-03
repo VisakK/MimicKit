@@ -20,18 +20,18 @@ env:
 
     enable_early_termination: True
     key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
-contact_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
-#contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"] # cartwheel
-    #contact_bodies: [] # roll and crawl
+    # contact_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    # contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"] # cartwheel
+    contact_bodies: ["Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # roll and crawl
     
-    motion_file: "data/motions/smpl/smpl_walk.pkl"
+    motion_file: "data/motions/smpl/scorpion_pose"
 
-    joint_err_w: [1.0, 0.6, 0.4, 0.3, 1.0, 0.6, 0.4, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.0, 0.6, 0.4, 0.3, 0.2, 1.0, 0.6, 0.4, 0.3, 0.2]
+    joint_err_w: [1.0, 0.6, 0.4, 0.3, 1.0, 0.6, 0.4, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
   
     reward_pose_w: 0.5
     reward_vel_w: 0.1
-    reward_root_pose_w: 0.15
-    reward_root_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
     reward_key_pos_w: 0.15
 
     reward_pose_scale: 0.25
@@ -42,7 +42,7 @@ contact_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
 
 
 engine:
-    engine_name: "isaac_gym"
+    engine_name: "isaac_lab"
     
     control_mode: "pos"
     control_freq: 30

@@ -1,0 +1,64 @@
+env_name: "deepmimic"
+
+env:
+    char_file: "data/assets/humanoid/humanoid.xml"
+    camera_mode: "track"
+
+    episode_length: 10.0 # seconds
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 1.0 # m
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    log_tracking_error: True
+    log_ground_contact_forces: True
+    log_joint_torques: True
+    log_dir: "output/diagnostics"
+    log_tag: "humanoid_impulse"
+    log_save_interval: 100
+
+    # Foot-strike impulse penalty enabled. The tracking reward is multiplied by
+    # exp(-scale * |F|) at each detected strike (low->high transition in
+    # vertical GRF on the listed bodies). reward_impulse_w sets how much of the
+    # base reward is gated on the strike penalty (0 = off, 1 = full gating).
+    reward_impulse_w: 0.3
+    reward_impulse_scale: 1.0e-5
+    reward_impulse_threshold: 50.0
+    impulse_penalty_bodies: ["right_foot", "left_foot"]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.882416, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["head", "right_hand", "left_hand", "right_foot", "left_foot"]
+
+    motion_file: "data/motions/humanoid/humanoid_run.pkl"
+
+    joint_err_w: [1.0, 0.6, 0.6, 0.4, 0.0, 0.6, 0.4, 0.0, 1.0, 0.6, 0.4, 1.0, 0.6, 0.4]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.15
+    reward_root_vel_w: 0.1
+    reward_key_pos_w: 0.15
+
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

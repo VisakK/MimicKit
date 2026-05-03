@@ -10,11 +10,11 @@ env:
     
     key_bodies: ["head", "right_hand", "left_hand", "right_foot", "left_foot"]
 
-    motion_file: "data/motions/humanoid/humanoid_spinkick.pkl"
+    motion_file: "data/motions/humanoid/yoga_pose"
 
 
 engine:
-    engine_name: "isaac_gym"
+    engine_name: "isaac_lab"
     
     control_mode: "none"
     control_freq: 30

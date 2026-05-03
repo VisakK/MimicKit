@@ -14,18 +14,51 @@ env:
     num_phase_encoding: 4
     tar_obs_steps: [1, 2, 3]
     rand_reset: True
-    log_tracking_error: False
+    log_tracking_error: True
+    log_ground_contact_forces: False
+    log_joint_torques: False
+    log_dir: "output/diagnostics"
+    log_tag: "humanoid_run_default"
+    log_save_interval: 100
+
+    # Foot-strike impulse penalty. Set reward_impulse_w > 0 to enable. The
+    # penalty multiplies the tracking reward by exp(-scale * |F|) at each
+    # detected strike (low->high transition in vertical GRF on the listed bodies).
+    reward_impulse_w: 0.0
+    reward_impulse_scale: 1.0e-5
+    reward_impulse_threshold: 50.0
+    impulse_penalty_bodies: ["right_foot", "left_foot"]
+
+    # Metabolic Cost of Transport bonus (additive). Set reward_cot_w > 0 to
+    # enable. Adds reward_cot_w * exp(-reward_cot_scale * cot) to the
+    # tracking reward, with cot = sum(|tau_i * dq_i|) / (m * g * v). `v` is
+    # clamped from below by reward_cot_min_speed (m/s) to avoid divide-by-
+    # zero when the character is near rest.
+    reward_cot_w: 0.0
+    reward_cot_scale: 0.5
+    reward_cot_min_speed: 0.5
+
+    # Vertical-impulse penalty (additive). Set reward_vert_impulse_w > 0 to
+    # enable. Integrates F_z * dt over each foot's ground-contact bout
+    # (heel-strike to toe-off; accumulator resets at the next heel-strike)
+    # and adds reward_vert_impulse_w * exp(-scale * I_peak) to the tracking
+    # reward, where I_peak is the peak across feet. The threshold (N) gates
+    # contact detection and should sit well above sensor noise.
+    reward_vert_impulse_w: 0.0
+    reward_vert_impulse_scale: 0.01
+    reward_vert_impulse_threshold: 50.0
+    vert_impulse_penalty_bodies: ["right_foot", "left_foot"]
 
     ref_char_offset: [2.0, 0.0, 0.0] # m
     init_pose: [0, 0, 0.882416, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
     enable_early_termination: True
     key_bodies: ["head", "right_hand", "left_hand", "right_foot", "left_foot"]
-    contact_bodies: ["right_foot", "left_foot"]
+    #contact_bodies: ["right_foot", "left_foot"]
     #contact_bodies: ["right_hand", "left_hand", "right_foot", "left_foot"] # cartwheel
     #contact_bodies: [] # roll and crawl
 
-    motion_file: "data/motions/humanoid/humanoid_spinkick.pkl"
+    motion_file: "data/motions/humanoid/humanoid_run.pkl"
 
     joint_err_w: [1.0, 0.6, 0.6, 0.4, 0.0, 0.6, 0.4, 0.0, 1.0, 0.6, 0.4, 1.0, 0.6, 0.4]
  
@@ -43,7 +76,7 @@ env:
 
 
 engine:
-    engine_name: "isaac_gym"
+    engine_name: "isaac_lab"
     
     control_mode: "pos"
     control_freq: 30

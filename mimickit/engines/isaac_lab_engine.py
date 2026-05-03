@@ -971,7 +971,7 @@ class IsaacLabEngine(engine.Engine):
             if (obj_type == engine.ObjType.articulated):
                 filter_prim_paths = [GROUND_PATH + ".*"]
 
-                regex = OBJ_PATH_TEMPLATE.format(".*", obj_id) + "/robot/.*"
+                regex = OBJ_PATH_TEMPLATE.format(".*", obj_id) + "/(robot|pelvis)/.*"
                 sensor_cfg = ContactSensorCfg(prim_path=regex, 
                                               update_period=timestep,
                                               filter_prim_paths_expr=filter_prim_paths)

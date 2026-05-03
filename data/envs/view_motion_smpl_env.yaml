@@ -10,11 +10,11 @@ env:
     
     key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
 
-    motion_file: "data/motions/smpl/smpl_spinkick.pkl"
+    motion_file: "data/motions/smpl/scorpion_pose"
 
 
 engine:
-    engine_name: "isaac_gym"
+    engine_name: "isaac_lab"
     
     control_mode: "none"
     control_freq: 30

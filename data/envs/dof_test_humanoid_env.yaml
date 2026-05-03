@@ -11,7 +11,7 @@ env:
     init_pose: [0, 0, 1.2]
 
 engine:
-    engine_name: "isaac_gym"
+    engine_name: "isaac_lab"
     
     control_mode: "pos"
     control_freq: 30

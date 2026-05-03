@@ -42,7 +42,7 @@ contact_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
 
 
 engine:
-    engine_name: "isaac_gym"
+    engine_name: "isaac_lab"
     
     control_mode: "pos"
     control_freq: 30
