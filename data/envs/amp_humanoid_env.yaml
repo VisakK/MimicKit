@@ -18,11 +18,11 @@ env:
 
     enable_early_termination: True
     key_bodies: ["head", "right_hand", "left_hand", "right_foot", "left_foot"]
-    contact_bodies: ["right_foot", "left_foot"]
+    #contact_bodies: ["right_foot", "left_foot"]
     #contact_bodies: ["right_hand", "left_hand", "right_foot", "left_foot"] # cartwheel
     #contact_bodies: [] # roll and crawl
 
-    motion_file: "data/motions/humanoid/humanoid_spinkick.pkl"
+    motion_file: "data/motions/humanoid/humanoid_run.pkl"
 
     reward_pose_w: 0.5
     reward_vel_w: 0.1

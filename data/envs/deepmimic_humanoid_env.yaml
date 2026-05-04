@@ -15,8 +15,8 @@ env:
     tar_obs_steps: [1, 2, 3]
     rand_reset: True
     log_tracking_error: True
-    log_ground_contact_forces: False
-    log_joint_torques: False
+    log_ground_contact_forces: True
+    log_joint_torques: True
     log_dir: "output/diagnostics"
     log_tag: "humanoid_run_default"
     log_save_interval: 100

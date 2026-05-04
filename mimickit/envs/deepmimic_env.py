@@ -105,6 +105,7 @@ class DeepMimicEnv(char_env.CharEnv):
             self._ground_contact_forces_log = []
             self._joint_torques_log = []
             self._dof_pos_log = []
+            self._body_pos_log = []
             self._time_log = []
             self._log_step_count = 0
             if (self._log_ground_contact_forces or self._log_joint_torques) \
@@ -378,6 +379,7 @@ class DeepMimicEnv(char_env.CharEnv):
         self._ground_contact_forces_log = []
         self._joint_torques_log = []
         self._dof_pos_log = []
+        self._body_pos_log = []
         self._time_log = []
         self._log_step_count = 0
         self._log_atexit_registered = False
@@ -739,11 +741,24 @@ class DeepMimicEnv(char_env.CharEnv):
                 self._record_joint_torques(env_ids)
 
             if (self._log_ground_contact_forces or self._log_joint_torques):
-                self._time_log.append(self._time_buf.detach().clone().cpu())
-                self._log_step_count += 1
-                if (self._log_save_interval > 0
-                        and self._log_step_count % self._log_save_interval == 0):
-                    self._save_logs()
+                # Match the env_ids gate used inside _record_*. _update_info
+                # is called both from step() (env_ids=None) and from reset()
+                # with env_ids that may be an empty tensor when no env
+                # terminated; the GRF/torque recorders skip that case, so
+                # the time log must skip it too or it drifts to ~2x.
+                if (env_ids is None or len(env_ids) > 0):
+                    self._time_log.append(self._time_buf.detach().clone().cpu())
+                    # Body positions are recorded here (paired with time)
+                    # so derived metrics (COM velocity, stride length,
+                    # cost of transport) can be reconstructed offline
+                    # whenever either logging flag is on.
+                    char_id = self._get_char_id()
+                    body_pos = self._engine.get_body_pos(char_id)
+                    self._body_pos_log.append(body_pos.detach().clone().cpu())
+                    self._log_step_count += 1
+                    if (self._log_save_interval > 0
+                            and self._log_step_count % self._log_save_interval == 0):
+                        self._save_logs()
 
         return
 
@@ -883,6 +898,12 @@ class DeepMimicEnv(char_env.CharEnv):
             payload["joint_torques"] = torch.stack(self._joint_torques_log, dim=0)
         if (len(self._dof_pos_log) > 0):
             payload["dof_pos"] = torch.stack(self._dof_pos_log, dim=0)
+        if (len(self._body_pos_log) > 0):
+            payload["body_pos"] = torch.stack(self._body_pos_log, dim=0)
+        # Total character mass (kg). Saved so the offline plotter can
+        # compute cost of transport without re-querying the engine.
+        if (hasattr(self, "_char_weight")):
+            payload["char_mass"] = float(self._char_weight / 9.81)
         if (len(self._time_log) > 0):
             payload["time"] = torch.stack(self._time_log, dim=0)
 
