@@ -71,6 +71,28 @@ class DeepMimicEnv(char_env.CharEnv):
         self._vert_impulse_penalty_bodies = env_config.get("vert_impulse_penalty_bodies",
                                                             ["right_foot", "left_foot"])
 
+        # Center-of-mass over support reward (set weight to 0 to disable). Adds
+        # reward_com_support_w * exp(-reward_com_support_scale * d^2) to the
+        # tracking reward, where d is the horizontal distance from the
+        # whole-body COM to the centroid of `com_support_bodies`. For a
+        # quasi-static, mirror-symmetric hold, static moment balance ties the
+        # per-contact load asymmetry to this COM offset, so driving it to zero
+        # equalizes the contact forces — using kinematics only (no force sensing).
+        self._reward_com_support_w = env_config.get("reward_com_support_w", 0.0)
+        self._reward_com_support_scale = env_config.get("reward_com_support_scale", 10.0)
+        self._com_support_bodies = env_config.get("com_support_bodies", [])
+
+        # Contact-force balance reward (set weight to 0 to disable). Adds
+        # reward_force_balance_w * exp(-reward_force_balance_scale * c), where
+        # c = sum_i ||F_i||^2 / W^2 over `force_balance_bodies` (W = body
+        # weight). This convex cost is minimized, under the weight-support
+        # constraint the tracking reward imposes, by the minimum-norm force
+        # distribution: equal load sharing across symmetric contacts and no
+        # wasteful internal/shear forces.
+        self._reward_force_balance_w = env_config.get("reward_force_balance_w", 0.0)
+        self._reward_force_balance_scale = env_config.get("reward_force_balance_scale", 1.0)
+        self._force_balance_bodies = env_config.get("force_balance_bodies", [])
+
         self._visualize_ref_char = env_config.get("visualize_ref_char", True)
         
         super().__init__(config=config, num_envs=num_envs, device=device,
@@ -105,6 +127,7 @@ class DeepMimicEnv(char_env.CharEnv):
             self._ground_contact_forces_log = []
             self._joint_torques_log = []
             self._dof_pos_log = []
+            self._dof_vel_log = []
             self._body_pos_log = []
             self._time_log = []
             self._log_step_count = 0
@@ -147,7 +170,12 @@ class DeepMimicEnv(char_env.CharEnv):
         self._contact_body_ids = self._build_body_ids_tensor(contact_bodies)
 
         # Bodies whose foot-strike impulse we penalize when reward_impulse_w > 0.
-        self._impulse_body_ids = self._build_body_ids_tensor(self._impulse_penalty_bodies)
+        # When the penalty is disabled, skip the body-name lookup entirely so
+        # configs that don't define impulse_penalty_bodies (and run on skeletons
+        # without the default body names) still load. Downstream reward/reset
+        # code already guards on _impulse_body_ids.shape[0] > 0.
+        impulse_bodies = self._impulse_penalty_bodies if self._reward_impulse_w > 0.0 else []
+        self._impulse_body_ids = self._build_body_ids_tensor(impulse_bodies)
         num_envs = self.get_num_envs()
         self._prev_contact_force_z = torch.zeros([num_envs, len(self._impulse_body_ids)],
                                                  device=self._device, dtype=torch.float32)
@@ -155,7 +183,10 @@ class DeepMimicEnv(char_env.CharEnv):
 
         # Per-bout vertical-impulse accumulator. Each entry integrates F_z*dt
         # while the foot is in contact and is reset on the next heel-strike.
-        self._vert_impulse_body_ids = self._build_body_ids_tensor(self._vert_impulse_penalty_bodies)
+        # Disabled => no body lookup (see note above).
+        vert_impulse_bodies = (self._vert_impulse_penalty_bodies
+                               if self._reward_vert_impulse_w > 0.0 else [])
+        self._vert_impulse_body_ids = self._build_body_ids_tensor(vert_impulse_bodies)
         self._curr_bout_vert_impulse = torch.zeros(
             [num_envs, len(self._vert_impulse_body_ids)],
             device=self._device, dtype=torch.float32)
@@ -163,11 +194,28 @@ class DeepMimicEnv(char_env.CharEnv):
             [num_envs, len(self._vert_impulse_body_ids)],
             device=self._device, dtype=torch.bool)
 
+        # Support bodies for the COM-over-support reward and contact bodies for
+        # the force-balance reward. Both skip the name lookup when disabled;
+        # downstream reward code guards on *_body_ids.shape[0] > 0. Stateless
+        # terms (computed each step), so no reset bookkeeping is needed.
+        com_support_bodies = self._com_support_bodies if self._reward_com_support_w > 0.0 else []
+        self._com_support_body_ids = self._build_body_ids_tensor(com_support_bodies)
+        force_balance_bodies = self._force_balance_bodies if self._reward_force_balance_w > 0.0 else []
+        self._force_balance_body_ids = self._build_body_ids_tensor(force_balance_bodies)
+
         # Cache m*g for the cost-of-transport reward. Assumes all envs share
         # the same character (true today since char_file is global), so a
         # single scalar covers every env.
         char_mass = float(self._engine.calc_obj_mass(0, char_id))
         self._char_weight = char_mass * 9.81
+
+        # Per-body masses (common body order) cached for the offline
+        # mass-weighted center-of-mass computation in the diagnostics plotter.
+        self._body_masses = self._engine.get_body_masses(0, char_id)
+        # Normalized on-device per-body mass weights for the online
+        # COM-over-support reward (einsum against body_pos each step).
+        com_masses = self._body_masses.to(self._device).float()
+        self._com_body_weights = com_masses / torch.clamp(com_masses.sum(), min=1e-8)
 
         joint_err_w = env_config.get("joint_err_w", None)
         self._parse_joint_err_weights(joint_err_w)
@@ -379,6 +427,7 @@ class DeepMimicEnv(char_env.CharEnv):
         self._ground_contact_forces_log = []
         self._joint_torques_log = []
         self._dof_pos_log = []
+        self._dof_vel_log = []
         self._body_pos_log = []
         self._time_log = []
         self._log_step_count = 0
@@ -576,7 +625,8 @@ class DeepMimicEnv(char_env.CharEnv):
         # Cache GRF once if any GRF-dependent term is active.
         ground_contact_forces = None
         need_gcf = (self._reward_vert_impulse_w > 0.0 and self._vert_impulse_body_ids.shape[0] > 0) \
-                   or (self._reward_impulse_w > 0.0 and self._impulse_body_ids.shape[0] > 0)
+                   or (self._reward_impulse_w > 0.0 and self._impulse_body_ids.shape[0] > 0) \
+                   or (self._reward_force_balance_w > 0.0 and self._force_balance_body_ids.shape[0] > 0)
         if (need_gcf):
             ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
 
@@ -596,6 +646,18 @@ class DeepMimicEnv(char_env.CharEnv):
             self._reward_buf[:], strike_imp = self._apply_impulse_penalty(
                 self._reward_buf, ground_contact_forces)
             reward_components["foot_strike_impulse"] = strike_imp
+
+        if (self._reward_com_support_w > 0.0 and self._com_support_body_ids.shape[0] > 0):
+            self._reward_buf[:], com_offset, com_support_r = self._apply_com_support_reward(
+                self._reward_buf, body_pos)
+            reward_components["com_support_offset"] = com_offset
+            reward_components["com_support_r"] = com_support_r
+
+        if (self._reward_force_balance_w > 0.0 and self._force_balance_body_ids.shape[0] > 0):
+            self._reward_buf[:], fb_cost, force_balance_r = self._apply_force_balance_reward(
+                self._reward_buf, ground_contact_forces)
+            reward_components["force_balance_cost"] = fb_cost
+            reward_components["force_balance_r"] = force_balance_r
 
         # Total weighted reward (post all transformations) for inspection.
         reward_components["reward_total"] = self._reward_buf
@@ -685,6 +747,32 @@ class DeepMimicEnv(char_env.CharEnv):
         self._prev_contact_force_z = foot_force_z.detach().clone()
         self._step_impulse_penalty = per_env_impulse.detach().clone()
         return blended, per_env_impulse
+
+    def _apply_com_support_reward(self, reward_buf, body_pos):
+        # Reward keeping the horizontal whole-body COM projection over the
+        # centroid of the support bodies. For a quasi-static, mirror-symmetric
+        # hold, static moment balance makes the per-contact load asymmetry
+        # proportional to this COM offset, so minimizing it equalizes the
+        # contact forces with no force sensing. Returns (new_reward,
+        # offset_sq, com_support_r) for the iter-average reward-term tracker.
+        com = torch.einsum("nbk,b->nk", body_pos, self._com_body_weights)
+        support_xy = body_pos[:, self._com_support_body_ids, :2].mean(dim=1)
+        offset_sq = torch.sum((com[..., :2] - support_xy) ** 2, dim=-1)
+        com_support_r = torch.exp(-self._reward_com_support_scale * offset_sq)
+        return reward_buf + self._reward_com_support_w * com_support_r, offset_sq, com_support_r
+
+    def _apply_force_balance_reward(self, reward_buf, ground_contact_forces):
+        # Penalize the sum of squared contact-force magnitudes over the listed
+        # bodies, normalized by body weight squared so the cost is
+        # dimensionless. Under the weight-support constraint the tracking
+        # reward imposes, this convex cost is minimized by the minimum-norm
+        # force distribution: equal load sharing across symmetric contacts and
+        # no wasteful internal/shear forces. Returns (new_reward, cost,
+        # force_balance_r) for the iter-average reward-term tracker.
+        forces = ground_contact_forces[:, self._force_balance_body_ids, :]
+        cost = torch.sum(forces * forces, dim=(-2, -1)) / (self._char_weight ** 2)
+        force_balance_r = torch.exp(-self._reward_force_balance_scale * cost)
+        return reward_buf + self._reward_force_balance_w * force_balance_r, cost, force_balance_r
 
     def _update_done(self):
         motion_times = self._get_motion_times()
@@ -858,8 +946,10 @@ class DeepMimicEnv(char_env.CharEnv):
             char_id = self._get_char_id()
             dof_torques = self._engine.get_dof_forces(char_id)
             dof_pos = self._engine.get_dof_pos(char_id)
+            dof_vel = self._engine.get_dof_vel(char_id)
             self._joint_torques_log.append(dof_torques.detach().clone().cpu())
             self._dof_pos_log.append(dof_pos.detach().clone().cpu())
+            self._dof_vel_log.append(dof_vel.detach().clone().cpu())
             self._diagnostics["dof_torques"] = dof_torques
         return
 
@@ -898,12 +988,17 @@ class DeepMimicEnv(char_env.CharEnv):
             payload["joint_torques"] = torch.stack(self._joint_torques_log, dim=0)
         if (len(self._dof_pos_log) > 0):
             payload["dof_pos"] = torch.stack(self._dof_pos_log, dim=0)
+        if (len(self._dof_vel_log) > 0):
+            payload["dof_vel"] = torch.stack(self._dof_vel_log, dim=0)
         if (len(self._body_pos_log) > 0):
             payload["body_pos"] = torch.stack(self._body_pos_log, dim=0)
         # Total character mass (kg). Saved so the offline plotter can
         # compute cost of transport without re-querying the engine.
         if (hasattr(self, "_char_weight")):
             payload["char_mass"] = float(self._char_weight / 9.81)
+        # Per-body masses (kg) in body_names order, for the mass-weighted COM.
+        if (hasattr(self, "_body_masses")):
+            payload["body_masses"] = self._body_masses.detach().cpu()
         if (len(self._time_log) > 0):
             payload["time"] = torch.stack(self._time_log, dim=0)
 

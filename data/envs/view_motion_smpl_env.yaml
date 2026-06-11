@@ -10,7 +10,7 @@ env:
     
     key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
 
-    motion_file: "data/motions/smpl/scorpion_pose"
+    motion_file: "data/motions/smpl/220923_Half_Moon_Pose_or_Ardha_Chandrasana_-a"
 
 
 engine:

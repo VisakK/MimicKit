@@ -190,7 +190,13 @@ class Engine:
     @abc.abstractmethod
     def calc_obj_mass(self, env_id, obj_id):
         return
-    
+
+    @abc.abstractmethod
+    def get_body_masses(self, env_id, obj_id):
+        # Per-body masses (kg) for one env, in common body order. Used to
+        # compute a mass-weighted center of mass for diagnostics.
+        return
+
     @abc.abstractmethod
     def get_control_mode(self):
         return

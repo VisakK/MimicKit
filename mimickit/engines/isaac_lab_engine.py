@@ -527,7 +527,17 @@ class IsaacLabEngine(engine.Engine):
         masses = obj.root_physx_view.get_masses()[env_id]
         total_mass = masses.sum().item()
         return total_mass
-    
+
+    def get_body_masses(self, env_id, obj_id):
+        # PhysX returns per-body masses in sim order on the CPU; reorder to the
+        # common body order so the result lines up with get_body_pos /
+        # get_ground_contact_forces and get_body_names().
+        obj = self._objs[obj_id]
+        masses = obj.root_physx_view.get_masses()[env_id]
+        body_order_sim2common = self._body_order_sim2common[obj_id].cpu()
+        masses = masses[body_order_sim2common]
+        return masses
+
     def get_control_mode(self):
         return self._control_mode
     

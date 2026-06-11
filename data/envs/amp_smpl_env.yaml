@@ -18,8 +18,8 @@ env:
 
     enable_early_termination: True
     key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
-contact_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
-#contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"] # cartwheel
+    contact_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    #contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"] # cartwheel
     #contact_bodies: [] # roll and crawl
     
     motion_file: "data/motions/smpl/smpl_walk.pkl"

@@ -465,7 +465,16 @@ class IsaacGymEngine(engine.Engine):
         rb_props = self._gym.get_actor_rigid_body_properties(env_ptr, obj_id)
         total_mass = sum(rb.mass for rb in rb_props)
         return total_mass
-    
+
+    def get_body_masses(self, env_id, obj_id):
+        # Per-body masses (kg). Isaac Gym keeps bodies in the asset's native
+        # order (no sim<->common remap here), so this lines up with
+        # get_body_pos / get_obj_body_names directly.
+        env_ptr = self.get_env(env_id)
+        rb_props = self._gym.get_actor_rigid_body_properties(env_ptr, obj_id)
+        masses = torch.tensor([rb.mass for rb in rb_props], dtype=torch.float32)
+        return masses
+
     def get_control_mode(self):
         return self._control_mode
     
