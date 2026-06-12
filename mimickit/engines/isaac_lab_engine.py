@@ -102,6 +102,7 @@ class IsaacLabEngine(engine.Engine):
         
         self._build_order_tensors()
         self._build_sim_tensors()
+        self._validate_ground_contact_sensors()
         return
     
     def step(self):
@@ -981,7 +982,11 @@ class IsaacLabEngine(engine.Engine):
             if (obj_type == engine.ObjType.articulated):
                 filter_prim_paths = [GROUND_PATH + ".*"]
 
-                regex = OBJ_PATH_TEMPLATE.format(".*", obj_id) + "/(robot|pelvis)/.*"
+                # Body prims sit under a container scope whose name depends on
+                # the MJCF->USD importer version: "robot" (shipped smpl.usd),
+                # "pelvis"/"Pelvis" (shipped humanoid.usd, locally converted
+                # assets - named after the root body).
+                regex = OBJ_PATH_TEMPLATE.format(".*", obj_id) + "/(robot|pelvis|Pelvis)/.*"
                 sensor_cfg = ContactSensorCfg(prim_path=regex, 
                                               update_period=timestep,
                                               filter_prim_paths_expr=filter_prim_paths)
@@ -991,7 +996,27 @@ class IsaacLabEngine(engine.Engine):
         
             self._ground_contact_sensors.append(sensor)
         return
-    
+
+    def _validate_ground_contact_sensors(self):
+        # get_contact_forces / get_ground_contact_forces return tensors in the
+        # sensor's own body order (USD prim traversal) with no sim->common
+        # remap. That order happens to match the common DFS order for the
+        # shipped assets, but it is asset-dependent, so verify once at init.
+        # Note the PhysX sim link order does NOT match - applying the
+        # sim->common remap here would corrupt the data, not fix it.
+        objs_per_env = self.get_objs_per_env()
+        for obj_id in range(objs_per_env):
+            sensor = self._ground_contact_sensors[obj_id]
+            if (sensor is not None):
+                sensor_body_names = list(sensor.body_names)
+                common_body_names = list(self.get_obj_body_names(obj_id))
+                assert(sensor_body_names == common_body_names), \
+                    ("Contact sensor body order does not match the common body order for "
+                     "obj {:d}; contact-force indexing by body id would be wrong.\n"
+                     "sensor: {}\ncommon: {}").format(obj_id, sensor_body_names,
+                                                      common_body_names)
+        return
+
     def _build_body_order(self, obj):
         meta_data = obj.root_physx_view.shared_metatype
         link_names = meta_data.link_names

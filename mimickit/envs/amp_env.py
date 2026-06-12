@@ -276,6 +276,18 @@ class AMPEnv(deepmimic_env.DeepMimicEnv):
         return
 
     def _update_reward(self):
+        # AMP's style reward comes from the discriminator (computed by the
+        # agent, mixed via task_reward_weight/disc_reward_weight). The env
+        # task reward is just the shared auxiliary shaping terms from
+        # DeepMimicEnv (energy, com-support, force-balance, ... - all
+        # yaml-gated, default off), so existing AMP configs are unchanged.
+        self._reward_buf[:] = 0.0
+        char_id = self._get_char_id()
+        root_vel = self._engine.get_root_vel(char_id)
+        dof_vel = self._engine.get_dof_vel(char_id)
+        body_pos = self._engine.get_body_pos(char_id)
+        reward_components = {}
+        self._apply_aux_rewards(char_id, root_vel, dof_vel, body_pos, reward_components)
         return
     
     def _reset_envs(self, env_ids):

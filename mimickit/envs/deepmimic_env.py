@@ -23,7 +23,42 @@ class DeepMimicEnv(char_env.CharEnv):
         self._tar_obs_steps = env_config.get("tar_obs_steps", [1])
         self._tar_obs_steps = torch.tensor(self._tar_obs_steps, device=device, dtype=torch.int)
         self._rand_reset = env_config.get("rand_reset", True)
-        
+
+        # Optional window (in seconds) for reference-state-init time sampling.
+        # Default None keeps the standard uniform sampling over the whole
+        # clip. Useful for focusing training on a sub-segment of a long clip
+        # (e.g. the held portion of a pose) without re-cutting the motion.
+        self._init_time_range = env_config.get("init_time_range", None)
+        if (self._init_time_range is not None):
+            assert(len(self._init_time_range) == 2
+                   and 0.0 <= self._init_time_range[0] < self._init_time_range[1]), \
+                "init_time_range must be [t0, t1] seconds with 0 <= t0 < t1"
+
+        # Whole-clip ground offset for the reference motion (see MotionLib).
+        # Off by default; lifts clips whose collision geometry penetrates the
+        # ground so reference-state-init does not fire depenetration impulses.
+        self._auto_ground_offset = env_config.get("auto_ground_offset", False)
+        self._ground_offset_clearance = env_config.get("ground_offset_clearance", 0.0)
+        # Constant whole-clip lift (meters, default 0). Manual alternative to
+        # auto_ground_offset for softening reset depenetration impulses
+        # without lifting by the clip's full worst-case penetration.
+        self._ground_offset = env_config.get("ground_offset", 0.0)
+
+        # Contact-aware observations (disabled by default). When enabled,
+        # appends to the policy observation:
+        #   1) per-body binary contact flags over obs_contact_bodies
+        #      (||ground contact force|| > obs_contact_force_threshold),
+        #   2) a signed support-polygon margin: horizontal distance from the
+        #      mass-weighted COM to the convex hull of the contacting bodies
+        #      (positive = inside the hull; -margin_cap sentinel when
+        #      airborne), and
+        #   3) a contact graph of pairwise body-position deltas, zeroed
+        #      unless both bodies of a pair are in contact.
+        self._enable_contact_obs = env_config.get("enable_contact_obs", False)
+        self._obs_contact_bodies = env_config.get("obs_contact_bodies", [])
+        self._obs_contact_force_threshold = env_config.get("obs_contact_force_threshold", 1.0)
+        self._obs_contact_margin_cap = env_config.get("obs_contact_margin_cap", 1.0)
+
         self._ref_char_offset = torch.tensor(env_config["ref_char_offset"], device=device, dtype=torch.float)
         self._log_tracking_error = env_config.get("log_tracking_error", False)
         self._log_ground_contact_forces = env_config.get("log_ground_contact_forces", False)
@@ -92,6 +127,14 @@ class DeepMimicEnv(char_env.CharEnv):
         self._reward_force_balance_w = env_config.get("reward_force_balance_w", 0.0)
         self._reward_force_balance_scale = env_config.get("reward_force_balance_scale", 1.0)
         self._force_balance_bodies = env_config.get("force_balance_bodies", [])
+
+        # Energy penalty (set weight to 0 to disable). Adds
+        # reward_energy_w * exp(-reward_energy_scale * e), where
+        # e = sum_i |tau_i * dq_i| is the total mechanical power (W). This
+        # penalizes torque-thrashing control; quasi-static torque abuse is
+        # bounded separately by the actuator effort limits.
+        self._reward_energy_w = env_config.get("reward_energy_w", 0.0)
+        self._reward_energy_scale = env_config.get("reward_energy_scale", 1e-3)
 
         self._visualize_ref_char = env_config.get("visualize_ref_char", True)
         
@@ -220,12 +263,51 @@ class DeepMimicEnv(char_env.CharEnv):
         joint_err_w = env_config.get("joint_err_w", None)
         self._parse_joint_err_weights(joint_err_w)
 
+        # Contact-observation buffers (only built when the feature is on).
+        if (self._enable_contact_obs):
+            assert(len(self._obs_contact_bodies) > 0), \
+                "enable_contact_obs requires a non-empty obs_contact_bodies list"
+            self._obs_contact_body_ids = self._build_body_ids_tensor(self._obs_contact_bodies)
+            num_contact_bodies = self._obs_contact_body_ids.shape[0]
+
+            # Fixed fan of horizontal unit directions for the batched
+            # support-function evaluation of the support-polygon margin.
+            num_dirs = 16
+            angles = (2.0 * np.pi / num_dirs) * torch.arange(num_dirs, device=self._device,
+                                                             dtype=torch.float32)
+            self._support_polygon_dirs = torch.stack([torch.cos(angles), torch.sin(angles)], dim=-1)
+
+            # All unordered body pairs for the contact graph.
+            pair_ids = torch.triu_indices(num_contact_bodies, num_contact_bodies, offset=1,
+                                          device=self._device)
+            self._contact_pair_ids_i = pair_ids[0]
+            self._contact_pair_ids_j = pair_ids[1]
+
+            # Contact sensor data is not refreshed when envs are reset without
+            # stepping physics, so the first observation after a reset would
+            # otherwise contain the previous episode's contact forces. Envs
+            # flagged stale get their contact observations zeroed until the
+            # next physics step.
+            self._contact_obs_stale = torch.zeros(num_envs, device=self._device, dtype=torch.bool)
+
         return
 
     def _load_motions(self, motion_file):
-        self._motion_lib = motion_lib.MotionLib(motion_file=motion_file, 
+        self._motion_lib = motion_lib.MotionLib(motion_file=motion_file,
                                                 kin_char_model=self._kin_char_model,
-                                                device=self._device)
+                                                device=self._device,
+                                                auto_ground_offset=self._auto_ground_offset,
+                                                ground_offset_clearance=self._ground_offset_clearance,
+                                                ground_offset=self._ground_offset,
+                                                char_file=self._char_file)
+
+        if (self._init_time_range is not None):
+            min_len = self._motion_lib.get_motion_lengths().min().item()
+            assert(self._init_time_range[0] < min_len), \
+                ("init_time_range[0] ({:.3f}s) >= shortest clip length ({:.3f}s); "
+                 "reference-state init would collapse to the clip end").format(
+                    self._init_time_range[0], min_len)
+
         return
     
     def _parse_joint_err_weights(self, joint_err_w):
@@ -280,6 +362,12 @@ class DeepMimicEnv(char_env.CharEnv):
                 and self._vert_impulse_body_ids.shape[0] > 0):
             self._curr_bout_vert_impulse[env_ids] = 0.0
             self._prev_vert_impulse_in_contact[env_ids] = True
+
+        # The contact sensor still holds the pre-reset pose's forces until the
+        # next physics step, so contact observations for these envs are zeroed
+        # until then.
+        if (self._enable_contact_obs):
+            self._contact_obs_stale[env_ids] = True
 
         return
 
@@ -356,7 +444,12 @@ class DeepMimicEnv(char_env.CharEnv):
 
         if (self._enable_ref_char()):
             self._update_ref_char()
-        
+
+        # _update_misc only runs post-physics, so contact forces are fresh
+        # again for every env.
+        if (self._enable_contact_obs):
+            self._contact_obs_stale[:] = False
+
         return
     
     def _update_ref_motion(self):
@@ -409,7 +502,16 @@ class DeepMimicEnv(char_env.CharEnv):
         motion_ids = self._motion_lib.sample_motions(n)
 
         if (self._rand_reset):
-            motion_times = self._motion_lib.sample_time(motion_ids)
+            if (self._init_time_range is not None):
+                motion_len = self._motion_lib.get_motion_length(motion_ids)
+                lo = torch.clamp(torch.full_like(motion_len, self._init_time_range[0]),
+                                 max=motion_len)
+                hi = torch.clamp(torch.full_like(motion_len, self._init_time_range[1]),
+                                 max=motion_len)
+                rand_phase = torch.rand(n, dtype=motion_len.dtype, device=self._device)
+                motion_times = lo + rand_phase * (hi - lo)
+            else:
+                motion_times = self._motion_lib.sample_time(motion_ids)
         else:
             motion_times = torch.zeros(n, dtype=torch.float, device=self._device)
 
@@ -446,6 +548,7 @@ class DeepMimicEnv(char_env.CharEnv):
 
         super()._build_envs(config, num_envs)
 
+        self._char_file = config["env"]["char_file"]
         motion_file = config["env"]["motion_file"]
         self._load_motions(motion_file)
         return
@@ -554,6 +657,28 @@ class DeepMimicEnv(char_env.CharEnv):
                                     tar_root_rot=tar_root_rot,
                                     tar_joint_rot=tar_joint_rot,
                                     tar_key_pos=tar_key_pos)
+
+        if (self._enable_contact_obs):
+            contact_forces = self._engine.get_ground_contact_forces(char_id)
+            contact_obs_stale = self._contact_obs_stale
+            if (env_ids is not None):
+                contact_forces = contact_forces[env_ids]
+                contact_obs_stale = contact_obs_stale[env_ids]
+
+            contact_obs = compute_contact_obs(body_pos=body_pos,
+                                              root_rot=root_rot,
+                                              contact_forces=contact_forces,
+                                              contact_obs_stale=contact_obs_stale,
+                                              contact_body_ids=self._obs_contact_body_ids,
+                                              com_weights=self._com_body_weights,
+                                              force_threshold=self._obs_contact_force_threshold,
+                                              support_dirs=self._support_polygon_dirs,
+                                              pair_ids_i=self._contact_pair_ids_i,
+                                              pair_ids_j=self._contact_pair_ids_j,
+                                              global_obs=self._global_obs,
+                                              margin_cap=self._obs_contact_margin_cap)
+            obs = torch.cat([obs, contact_obs], dim=-1)
+
         return obs
     
     def _update_reward(self):
@@ -622,6 +747,15 @@ class DeepMimicEnv(char_env.CharEnv):
             "key_pos_r": key_pos_r,
         }
 
+        self._apply_aux_rewards(char_id, root_vel, dof_vel, body_pos, reward_components)
+        return
+
+    def _apply_aux_rewards(self, char_id, root_vel, dof_vel, body_pos, reward_components):
+        # Additive shaping terms (all yaml-gated, default off), applied on top
+        # of whatever is already in self._reward_buf. Shared with AMPEnv,
+        # whose task reward is exactly these terms over a zeroed buffer.
+        # Publishes reward_total and feeds the iter-average reward tracker.
+
         # Cache GRF once if any GRF-dependent term is active.
         ground_contact_forces = None
         need_gcf = (self._reward_vert_impulse_w > 0.0 and self._vert_impulse_body_ids.shape[0] > 0) \
@@ -659,6 +793,12 @@ class DeepMimicEnv(char_env.CharEnv):
             reward_components["force_balance_cost"] = fb_cost
             reward_components["force_balance_r"] = force_balance_r
 
+        if (self._reward_energy_w > 0.0):
+            self._reward_buf[:], energy, energy_r = self._apply_energy_reward(
+                self._reward_buf, char_id, dof_vel)
+            reward_components["energy"] = energy
+            reward_components["energy_r"] = energy_r
+
         # Total weighted reward (post all transformations) for inspection.
         reward_components["reward_total"] = self._reward_buf
 
@@ -689,6 +829,17 @@ class DeepMimicEnv(char_env.CharEnv):
         cot_r = torch.exp(-self._reward_cot_scale * cot)
 
         return reward_buf + self._reward_cot_w * cot_r, cot, cot_r
+
+    def _apply_energy_reward(self, reward_buf, char_id, dof_vel):
+        # Total mechanical power e = sum(|tau_i * dq_i|) (W), rewarded as
+        # exp(-scale * e) in [0, 1]. The torques are the actuator-model
+        # values (post effort-limit clipping). Returns (new_reward, energy,
+        # energy_r) so the caller can feed both into the iter-average
+        # reward-term tracker.
+        dof_torques = self._engine.get_dof_forces(char_id)
+        energy = torch.sum(torch.abs(dof_torques * dof_vel), dim=-1)
+        energy_r = torch.exp(-self._reward_energy_scale * energy)
+        return reward_buf + self._reward_energy_w * energy_r, energy, energy_r
 
     def _apply_vert_impulse_penalty(self, reward_buf, ground_contact_forces):
         # Maintain a per-foot accumulator for the integral of F_z * dt across
@@ -787,10 +938,6 @@ class DeepMimicEnv(char_env.CharEnv):
         body_pos = self._engine.get_body_pos(char_id)
         ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
 
-        ground_contact_tensor = torch.stack((self._ground_contact_forces_log), dim=0) if self._log_ground_contact_forces else None
-
-        # log this tensor 
-        # torch.save(ground_contact_tensor, "./mimickit/ground_contact_forces_log_run.pt")
         body_names = self._kin_char_model.get_body_names()
         # if self._contact_body_ids.shape[0] > 0:
         #     contact_body_names = [body_names[i] for i in self._contact_body_ids]
@@ -1067,6 +1214,65 @@ class _RewardTermTracker:
         denom = float(self._count)
         return {k: (s / denom).item() for k, s in self._sums.items()}
 
+
+def compute_contact_obs(body_pos, root_rot, contact_forces, contact_obs_stale,
+                        contact_body_ids, com_weights, force_threshold,
+                        support_dirs, pair_ids_i, pair_ids_j, global_obs, margin_cap):
+    """Contact-aware observation block: [flags (K), margin (1), graph (3*K*(K-1)/2)].
+
+    flags:  1.0 for each candidate body whose ground-contact force norm
+            exceeds force_threshold (0.0 otherwise).
+    margin: signed horizontal distance from the mass-weighted COM to the
+            convex hull of the contacting candidate bodies, evaluated with a
+            fixed fan of support directions (positive = COM inside the hull).
+            Clamped to +/- margin_cap; -margin_cap sentinel when nothing is
+            in contact. Only approximately rotation-invariant: the fan is
+            world-fixed, so the worst-case error is ~(hull half-span) *
+            sin(pi/num_dirs) (~4 cm for a 0.4 m two-contact segment with 16
+            directions). Monotone in the COM offset at any fixed heading.
+    graph:  pairwise position deltas between candidate bodies, zeroed unless
+            both bodies of the pair are in contact. World axes when
+            global_obs, heading-local otherwise (matching compute_char_obs).
+
+    Envs flagged in contact_obs_stale (just reset, sensor data is from the
+    previous episode) get zero flags, which propagates to the sentinel margin
+    and a zero graph.
+    """
+    candidate_forces = contact_forces[:, contact_body_ids, :]
+    flags = (torch.linalg.vector_norm(candidate_forces, dim=-1) > force_threshold).float()
+    flags = flags * torch.logical_not(contact_obs_stale).float().unsqueeze(-1)
+
+    candidate_pos = body_pos[:, contact_body_ids, :]
+
+    # Support-polygon margin via the support function of the contact hull:
+    # margin = min_d [ max_{i in contact}(p_i . d) - com . d ] over the
+    # direction fan. Exact in the dense-direction limit; degrades gracefully
+    # to (negative) point/segment distance for 1-2 contacts.
+    com_xy = torch.einsum("nbk,b->nk", body_pos, com_weights)[..., :2]
+    point_proj = torch.matmul(candidate_pos[..., :2], support_dirs.t())
+    masked_proj = torch.where(flags.unsqueeze(-1) > 0.5, point_proj,
+                              torch.full_like(point_proj, -1e9))
+    hull_support = torch.max(masked_proj, dim=1)[0]
+    com_proj = torch.matmul(com_xy, support_dirs.t())
+    margin = torch.min(hull_support - com_proj, dim=-1)[0]
+    margin = torch.clamp(margin, min=-margin_cap, max=margin_cap)
+    any_contact = torch.any(flags > 0.5, dim=-1)
+    margin = torch.where(any_contact, margin, torch.full_like(margin, -margin_cap))
+
+    # Contact graph: relative geometry of the active support points.
+    pair_deltas = candidate_pos[:, pair_ids_j, :] - candidate_pos[:, pair_ids_i, :]
+    if (not global_obs):
+        heading_inv_rot = torch_util.calc_heading_quat_inv(root_rot)
+        heading_inv_expand = heading_inv_rot.unsqueeze(-2).repeat((1, pair_deltas.shape[1], 1))
+        pair_deltas_flat = torch_util.quat_rotate(heading_inv_expand.reshape(-1, 4),
+                                                  pair_deltas.reshape(-1, 3))
+        pair_deltas = pair_deltas_flat.reshape(pair_deltas.shape)
+    pair_mask = flags[:, pair_ids_i] * flags[:, pair_ids_j]
+    graph = pair_deltas * pair_mask.unsqueeze(-1)
+    graph_flat = graph.reshape(graph.shape[0], -1)
+
+    contact_obs = torch.cat([flags, margin.unsqueeze(-1), graph_flat], dim=-1)
+    return contact_obs
 
 @torch.jit.script
 def compute_phase_obs(phase, num_phase_encoding):

@@ -19,7 +19,12 @@ class ViewMotionEnv(char_env.CharEnv):
     def _build_envs(self, config, num_envs):
         super()._build_envs(config, num_envs)
 
-        motion_file = config["env"]["motion_file"]
+        env_config = config["env"]
+        self._char_file = env_config["char_file"]
+        self._auto_ground_offset = env_config.get("auto_ground_offset", False)
+        self._ground_offset_clearance = env_config.get("ground_offset_clearance", 0.0)
+
+        motion_file = env_config["motion_file"]
         self._load_motions(motion_file)
         return
     
@@ -37,9 +42,12 @@ class ViewMotionEnv(char_env.CharEnv):
         return char_id
 
     def _load_motions(self, motion_file):
-        self._motion_lib = motion_lib.MotionLib(motion_file=motion_file, 
+        self._motion_lib = motion_lib.MotionLib(motion_file=motion_file,
                                                 kin_char_model=self._kin_char_model,
-                                                device=self._device)
+                                                device=self._device,
+                                                auto_ground_offset=self._auto_ground_offset,
+                                                ground_offset_clearance=self._ground_offset_clearance,
+                                                char_file=self._char_file)
         return
 
     def _update_misc(self):

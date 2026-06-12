@@ -3,6 +3,7 @@ import os
 import torch
 import yaml
 
+import anim.char_geoms as char_geoms
 import anim.motion as motion
 from util.logger import Logger
 import util.torch_util as torch_util
@@ -14,9 +15,35 @@ def extract_pose_data(frame):
     return root_pos, root_rot, joint_dof
 
 class MotionLib():
-    def __init__(self, motion_file, kin_char_model, device):
+    def __init__(self, motion_file, kin_char_model, device,
+                 auto_ground_offset=False, ground_offset_clearance=0.0,
+                 ground_offset=0.0, char_file=None):
         self._device = device
         self._kin_char_model = kin_char_model
+
+        # Manual constant whole-clip lift (meters), applied on top of (or
+        # instead of) the auto offset. Same consistency argument as below.
+        self._ground_offset = ground_offset
+
+        # Optional whole-clip ground offset (disabled by default). Some
+        # converted clips penetrate the ground plane (the converter only
+        # calibrates the first frames), which makes the physics solver fire a
+        # large depenetration impulse on reset. When enabled, each clip's root
+        # z is shifted by a constant so its lowest collision-geom point stays
+        # at/above z=0 over the whole clip. A constant shift keeps the
+        # finite-differenced reference velocities unchanged and keeps init,
+        # target observations, reward, and termination consistent.
+        self._ground_offset_clearance = ground_offset_clearance
+        self._char_geoms = None
+        if (auto_ground_offset):
+            assert char_file is not None, \
+                "auto_ground_offset requires the character file to parse collision geoms"
+            self._char_geoms = char_geoms.load_char_geoms(char_file,
+                                                          kin_char_model.get_body_names(),
+                                                          device)
+            assert any(len(g) > 0 for g in self._char_geoms), \
+                "auto_ground_offset: no collision geoms parsed from {:s}".format(char_file)
+
         self._load_motions(motion_file)
         return
 
@@ -185,6 +212,19 @@ class MotionLib():
             curr_len = 1.0 / fps * (num_frames - 1)
 
             root_pos, root_rot, joint_rot = self._extract_frame_data(frames)
+
+            ground_offset = self._ground_offset
+            if (self._char_geoms is not None):
+                ground_offset += self._calc_ground_offset(root_pos, root_rot, joint_rot)
+            if (ground_offset != 0.0):
+                root_pos = root_pos.clone()
+                root_pos[..., 2] += ground_offset
+                # Keep the raw frames consistent with the derived buffers.
+                frames = frames.copy()
+                frames[..., 2] += ground_offset
+                Logger.print("Applied ground offset of {:.4f}m to motion: {:s}".format(
+                    ground_offset, curr_file))
+
             root_pos_delta = root_pos[-1] - root_pos[0]
             root_pos_delta[..., -1] = 0.0
 
@@ -246,6 +286,16 @@ class MotionLib():
         self._motion_start_idx = lengths_shifted.cumsum(0)
         
         return
+
+    def _calc_ground_offset(self, root_pos, root_rot, joint_rot):
+        # Constant z-shift that lifts the clip's deepest collision-geom
+        # penetration to ground_offset_clearance above the ground plane.
+        # Never lowers a clip that already clears the ground.
+        body_pos, body_rot = self._kin_char_model.forward_kinematics(root_pos, root_rot, joint_rot)
+        min_geom_z = char_geoms.compute_min_geom_z(self._char_geoms, body_pos, body_rot)
+        min_geom_z = torch.min(min_geom_z).item()
+        offset = max(0.0, self._ground_offset_clearance - min_geom_z)
+        return offset
 
     def _fetch_motion_files(self, motion_file):
         ext = os.path.splitext(motion_file)[1]
