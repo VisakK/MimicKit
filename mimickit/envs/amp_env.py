@@ -11,6 +11,17 @@ class AMPEnv(deepmimic_env.DeepMimicEnv):
         env_config = config["env"]
         self._num_disc_obs_steps = env_config["num_disc_obs_steps"]
 
+        # Hybrid mode (default off -> existing AMP configs unchanged): when on,
+        # the env TASK reward is the full DeepMimic tracking reward (pose /
+        # key_pos / root tracking) plus the aux terms, and the agent adds the
+        # discriminator style reward on top (task_reward_weight * task_r +
+        # disc_reward_weight * disc_r). Tracking + pose_termination supply the
+        # kick-up / survival pressure pure AMP lacked; the discriminator
+        # supplies the proximal style (shoulder internal rotation) the
+        # saturating pose kernel cannot. Requires the per-step reference update
+        # to run even headless (see _update_ref_motion).
+        self._enable_task_tracking = env_config.get("enable_task_tracking", False)
+
         super().__init__(config=config, num_envs=num_envs, device=device,
                          visualize=visualize)
         return
@@ -183,7 +194,11 @@ class AMPEnv(deepmimic_env.DeepMimicEnv):
         return
     
     def _update_ref_motion(self):
-        if (self._enable_ref_char()):
+        # AMP normally only refreshes the reference when the ref char is
+        # visualized. Hybrid mode needs fresh per-step reference targets for
+        # the tracking reward (and pose termination), so update it then too
+        # even during headless training.
+        if (self._enable_ref_char() or self._enable_task_tracking):
             super()._update_ref_motion()
         return
     
@@ -276,7 +291,15 @@ class AMPEnv(deepmimic_env.DeepMimicEnv):
         return
 
     def _update_reward(self):
-        # AMP's style reward comes from the discriminator (computed by the
+        # Hybrid mode: env task reward = DeepMimic tracking reward + aux terms
+        # (DeepMimicEnv._update_reward); the agent mixes in the discriminator
+        # style reward via disc_reward_weight. Needs fresh per-step refs,
+        # guaranteed by _update_ref_motion under _enable_task_tracking.
+        if (self._enable_task_tracking):
+            super()._update_reward()
+            return
+
+        # AMP-native: style comes from the discriminator (computed by the
         # agent, mixed via task_reward_weight/disc_reward_weight). The env
         # task reward is just the shared auxiliary shaping terms from
         # DeepMimicEnv (energy, com-support, force-balance, ... - all

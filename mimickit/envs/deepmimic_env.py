@@ -136,6 +136,34 @@ class DeepMimicEnv(char_env.CharEnv):
         self._reward_energy_w = env_config.get("reward_energy_w", 0.0)
         self._reward_energy_scale = env_config.get("reward_energy_scale", 1e-3)
 
+        # Inversion bonus (set weight to 0 to disable). Flat reward while the
+        # root is upside-down (root-local +z mapped below
+        # inversion_up_threshold in world z) AND every body in
+        # inversion_bonus_bodies carries ground contact force. Unlike the
+        # other shaping terms this gate pays only in the goal state, so
+        # resting poses cannot farm it; its tracked mean (Inversion_Frac)
+        # doubles as a live inverted-time metric during training.
+        self._reward_inversion_w = env_config.get("reward_inversion_w", 0.0)
+        self._inversion_up_threshold = env_config.get("inversion_up_threshold", -0.5)
+        self._inversion_force_threshold = env_config.get("inversion_force_threshold", 5.0)
+        self._inversion_bonus_bodies = env_config.get("inversion_bonus_bodies", [])
+
+        # Key-body world-orientation reward (set weight to 0 to disable). Adds
+        # reward_orient_w * exp(-reward_orient_scale * sum_b ang(R_b, R_b_ref)^2)
+        # over orient_bodies, where ang is the world geodesic angle between a
+        # body's current and reference orientation. This is a DEDICATED
+        # task-space term, deliberately OUTSIDE the joint-space pose kernel
+        # (which is one saturating exponential shared across all joints): it
+        # penalizes the observable world orientation error of e.g. the hands
+        # regardless of which proximal joint produces it, so it can buy the
+        # contact-invariant hand yaw the weighted pose kernel could not. Scale
+        # calibrated for the hands: the fingers-inward defect is ~80 deg yaw
+        # (~1.4 rad) per hand -> sum-of-squares ~3.9 rad^2 -> orient_r ~0.14 at
+        # the defect and ~0.97 near reference (10 deg/hand), a usable gradient.
+        self._reward_orient_w = env_config.get("reward_orient_w", 0.0)
+        self._reward_orient_scale = env_config.get("reward_orient_scale", 0.5)
+        self._orient_bodies = env_config.get("orient_bodies", [])
+
         self._visualize_ref_char = env_config.get("visualize_ref_char", True)
         
         super().__init__(config=config, num_envs=num_envs, device=device,
@@ -245,6 +273,10 @@ class DeepMimicEnv(char_env.CharEnv):
         self._com_support_body_ids = self._build_body_ids_tensor(com_support_bodies)
         force_balance_bodies = self._force_balance_bodies if self._reward_force_balance_w > 0.0 else []
         self._force_balance_body_ids = self._build_body_ids_tensor(force_balance_bodies)
+        inversion_bodies = self._inversion_bonus_bodies if self._reward_inversion_w > 0.0 else []
+        self._inversion_body_ids = self._build_body_ids_tensor(inversion_bodies)
+        orient_bodies = self._orient_bodies if self._reward_orient_w > 0.0 else []
+        self._orient_body_ids = self._build_body_ids_tensor(orient_bodies)
 
         # Cache m*g for the cost-of-transport reward. Assumes all envs share
         # the same character (true today since char_file is global), so a
@@ -760,7 +792,8 @@ class DeepMimicEnv(char_env.CharEnv):
         ground_contact_forces = None
         need_gcf = (self._reward_vert_impulse_w > 0.0 and self._vert_impulse_body_ids.shape[0] > 0) \
                    or (self._reward_impulse_w > 0.0 and self._impulse_body_ids.shape[0] > 0) \
-                   or (self._reward_force_balance_w > 0.0 and self._force_balance_body_ids.shape[0] > 0)
+                   or (self._reward_force_balance_w > 0.0 and self._force_balance_body_ids.shape[0] > 0) \
+                   or (self._reward_inversion_w > 0.0 and self._inversion_body_ids.shape[0] > 0)
         if (need_gcf):
             ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
 
@@ -798,6 +831,17 @@ class DeepMimicEnv(char_env.CharEnv):
                 self._reward_buf, char_id, dof_vel)
             reward_components["energy"] = energy
             reward_components["energy_r"] = energy_r
+
+        if (self._reward_inversion_w > 0.0 and self._inversion_body_ids.shape[0] > 0):
+            self._reward_buf[:], inversion_frac = self._apply_inversion_bonus(
+                self._reward_buf, char_id, ground_contact_forces)
+            reward_components["inversion_frac"] = inversion_frac
+
+        if (self._reward_orient_w > 0.0 and self._orient_body_ids.shape[0] > 0):
+            self._reward_buf[:], orient_err, orient_r = self._apply_orient_reward(
+                self._reward_buf, char_id)
+            reward_components["orient_err"] = orient_err
+            reward_components["orient_r"] = orient_r
 
         # Total weighted reward (post all transformations) for inspection.
         reward_components["reward_total"] = self._reward_buf
@@ -840,6 +884,23 @@ class DeepMimicEnv(char_env.CharEnv):
         energy = torch.sum(torch.abs(dof_torques * dof_vel), dim=-1)
         energy_r = torch.exp(-self._reward_energy_scale * energy)
         return reward_buf + self._reward_energy_w * energy_r, energy, energy_r
+
+    def _apply_inversion_bonus(self, reward_buf, char_id, ground_contact_forces):
+        # Flat bonus gated on being upside-down with ALL listed bodies in
+        # ground contact - payable only in the goal state. Returns
+        # (new_reward, gate) so the gate's iter-mean lands in the tracker
+        # as Inversion_Frac (live inverted-time diagnostic).
+        root_rot = self._engine.get_root_rot(char_id)
+        up = torch.zeros_like(root_rot[..., :3])
+        up[..., 2] = 1.0
+        up_world = torch_util.quat_rotate(root_rot, up)
+        inverted = up_world[..., 2] < self._inversion_up_threshold
+
+        body_forces = ground_contact_forces[:, self._inversion_body_ids, :]
+        loaded = torch.all(torch.linalg.vector_norm(body_forces, dim=-1)
+                           > self._inversion_force_threshold, dim=-1)
+        gate = torch.logical_and(inverted, loaded).float()
+        return reward_buf + self._reward_inversion_w * gate, gate
 
     def _apply_vert_impulse_penalty(self, reward_buf, ground_contact_forces):
         # Maintain a per-foot accumulator for the integral of F_z * dt across
@@ -924,6 +985,25 @@ class DeepMimicEnv(char_env.CharEnv):
         cost = torch.sum(forces * forces, dim=(-2, -1)) / (self._char_weight ** 2)
         force_balance_r = torch.exp(-self._reward_force_balance_scale * cost)
         return reward_buf + self._reward_force_balance_w * force_balance_r, cost, force_balance_r
+
+    def _apply_orient_reward(self, reward_buf, char_id):
+        # Task-space world-orientation tracking of the listed key bodies (e.g.
+        # the hands): the geodesic angle between each body's current and
+        # reference world orientation, mapped through exp(-scale * sum_b ang^2).
+        # Unlike the joint-space pose kernel (one saturating exponential shared
+        # by all joints, where a chronic proximal error sits on the flat tail),
+        # this is a separate term targeting the OBSERVABLE orientation error,
+        # so it gives gradient on e.g. the contact-invariant hand yaw no matter
+        # which proximal joint produces it. self._ref_body_rot is refreshed to
+        # the current motion time each step (same source the key_pos term uses).
+        # Returns (new_reward, orient_err, orient_r) for the iter-average tracker.
+        body_rot = self._engine.get_body_rot(char_id)
+        cur_rot = body_rot[..., self._orient_body_ids, :]
+        ref_rot = self._ref_body_rot[..., self._orient_body_ids, :]
+        ang = torch_util.quat_diff_angle(cur_rot, ref_rot)
+        orient_err = torch.sum(ang * ang, dim=-1)
+        orient_r = torch.exp(-self._reward_orient_scale * orient_err)
+        return reward_buf + self._reward_orient_w * orient_r, orient_err, orient_r
 
     def _update_done(self):
         motion_times = self._get_motion_times()

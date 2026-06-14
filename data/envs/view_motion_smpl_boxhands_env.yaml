@@ -10,7 +10,7 @@ env:
 
     key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
 
-    motion_file: "data/motions/smpl/220923_Handstand_pose_or_Adho_Mukha_Vrksasana_-a"
+    motion_file: "data/motions/smpl/220923_Crane_Crow_Pose_or_Bakasana_-a"
 
 
 engine:

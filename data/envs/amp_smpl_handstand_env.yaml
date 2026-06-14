@@ -30,10 +30,12 @@ env:
     # Constant 2 cm whole-clip lift: softens the reset depenetration impulse
     # (raw clip hands penetrate ~2-3 cm during holds).
     ground_offset: 0.02
-    # Focus reference-state init on the longest hold; residual penetration
-    # with the 2 cm lift stays <= 1 cm inside this window. Note the disc
-    # still sees demo transitions from the WHOLE clip.
-    init_time_range: [32.5, 46.5]
+    # KICK-UP EXPERIMENT (2026-06-12): init_time_range removed. RSI now
+    # samples the whole 97.9 s clip (~50% non-inverted starts) AND, via the
+    # shared sampler, disc demos cover the whole clip too - kick-up
+    # transitions are in-distribution and earn style credit. Side effect:
+    # some inits land on frames penetrating up to ~3.1 cm against the 2 cm
+    # lift (mild reset impulses on a fraction of episodes - accepted).
 
     # Contact-aware observation block (policy obs only; the disc obs are
     # unchanged): per-body contact flags, support-polygon margin, contact
@@ -57,20 +59,28 @@ env:
     reward_root_vel_scale: 1.0
     reward_key_pos_scale: 10.0
 
-    # Auxiliary shaping terms. With task_reward_weight 0 in the agent yaml
-    # these are LOGGING-ONLY diagnostics (Energy etc. columns) - they do not
-    # pay reward. The first AMP run (task weight 1) was reward-hacked by a
-    # crouch farming exactly these terms.
-    reward_com_support_w: 0.5
+    # Auxiliary terms. task_reward_weight is 1.0 again (the inversion bonus
+    # needs the task channel), so anything nonzero here PAYS - the farmable
+    # balance terms stay OFF (they bred the crouch-camper); energy is kept
+    # at a negligible weight purely for the Energy log columns.
+    reward_com_support_w: 0.0
     reward_com_support_scale: 10.0
     com_support_bodies: ["R_Hand", "L_Hand"]
-    reward_force_balance_w: 0.4
+    reward_force_balance_w: 0.0
     reward_force_balance_scale: 1.0
     force_balance_bodies: ["R_Hand", "L_Hand"]
-    # Energy penalty: exp(-scale * sum|tau*qdot|), same calibration as the
-    # deepmimic realism run.
-    reward_energy_w: 0.25
+    reward_energy_w: 0.05
     reward_energy_scale: 0.001
+
+    # Inversion-gated bonus: flat 0.4/step ONLY while upside-down with both
+    # hands loaded - unfarmable by standing/crouching. Makes inverted income
+    # dominate the lazy-stander equilibrium that full-clip demos enable
+    # (standing between attempts is in-distribution for the disc). Its
+    # tracker mean (Inversion_Frac column) is the live kick-up metric.
+    reward_inversion_w: 0.4
+    inversion_up_threshold: -0.5
+    inversion_force_threshold: 5.0
+    inversion_bonus_bodies: ["R_Hand", "L_Hand"]
 
 
 engine:
