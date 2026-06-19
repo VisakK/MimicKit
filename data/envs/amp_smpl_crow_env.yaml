@@ -1,0 +1,107 @@
+# AMP-ONLY crow (Bakasana) on the corrected box-hands SMPL (strong arms:
+# Shoulder 150 / Elbow 100 / Wrist 75 / Hand 50). A deliberately SIMPLE
+# re-baseline after the attempt-2 post-mortem: no skill-graph, no aux reward
+# stack, no task bonus -- style comes purely from the AMP discriminator
+# (10-step history over root/joints/key bodies). Pair with the pure-AMP agent
+# data/agents/amp_smpl_agent.yaml (task_reward_weight 0, disc_reward_weight 1).
+#
+# Grounding fix (attempt-3 step 1/2): the raw clip penetrates the floor at
+# every frame. ground_offset (the existing per-clip manual z-correction,
+# inherited from DeepMimicEnv) seats the hold's hands at z=0. Measured offline
+# with tools/measure_ground_offset.py; auto_ground_offset left OFF so the lift
+# is an explicit, inspectable constant rather than a global-min artifact.
+#
+# RSI + disc demos are restricted (init_time_range) to the sustained balance
+# hold, so the experiment tests HOLDING a clean crow, decoupled from the hard
+# entry/foot-lift exploration. The unstable arm balance still requires active
+# control, so "freeze and pass" is not available (attempt-2 proxy-pass lesson).
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands.xml"
+    camera_mode: "track"
+
+    episode_length: 20.0 # seconds
+    global_obs: True
+    root_height_obs: True
+    pose_termination: False
+    enable_phase_obs: False
+    enable_tar_obs: False
+    num_disc_obs_steps: 10
+    rand_reset: True
+
+    # Restrict RSI AND discriminator-demo sampling to the sustained balance
+    # hold (root up_z ~0.25-0.45, hands deepest). Flip to the full clip by
+    # removing this line (expect a stand-and-sway local optimum without a task
+    # bonus -- the documented pure-AMP failure mode for ballistic entries).
+    init_time_range: [12.0, 22.0]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    # Fall = trunk/head/upper-body touches the GROUND. Self-collision (the
+    # shins resting on the upper arms) is excluded by the ground-only contact
+    # sensor, so keeping Shoulder/Thorax here does not false-terminate a good
+    # crow. Same set the crow DeepMimic node used.
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl/220923_Crane_Crow_Pose_or_Bakasana_-a"
+
+    # Per-clip z-correction (meters): seats the crow hold's hands at z=0 (raw
+    # hands penetrate 6.2 cm). auto_ground_offset OFF -> this explicit constant
+    # is the only lift. See tools/measure_ground_offset.py.
+    auto_ground_offset: False
+    ground_offset: 0.0624
+
+    # Contact-aware policy observation (does NOT touch the disc obs): per-body
+    # contact flags + support-polygon margin + contact graph. Helps the policy
+    # sense its hand load while balancing. +93 obs dims.
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    # Tracking-reward params are unused by pure AMP (env task reward is
+    # aux-only and the agent zeroes the task channel) but parsed by the shared
+    # base class; kept at template values.
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.15
+    reward_root_vel_w: 0.1
+    reward_key_pos_w: 0.15
+
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # PURE AMP: every auxiliary/task-shaping term OFF. The attempt-2 post-mortem
+    # showed these (force_balance, com_support, foot_clear, knee_support, ...)
+    # are farmable and pull away from faithful motion. Style is the
+    # discriminator's job alone here.
+    reward_com_support_w: 0.0
+    com_support_bodies: ["R_Hand", "L_Hand"]
+    reward_force_balance_w: 0.0
+    force_balance_bodies: ["R_Hand", "L_Hand"]
+    reward_foot_clear_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_orient_w: 0.0
+    reward_inversion_w: 0.0
+    # Negligible energy weight: zero training effect under task_reward_weight 0,
+    # kept only so the Energy column populates in the log.
+    reward_energy_w: 0.05
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

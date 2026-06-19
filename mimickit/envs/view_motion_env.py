@@ -23,6 +23,10 @@ class ViewMotionEnv(char_env.CharEnv):
         self._char_file = env_config["char_file"]
         self._auto_ground_offset = env_config.get("auto_ground_offset", False)
         self._ground_offset_clearance = env_config.get("ground_offset_clearance", 0.0)
+        # Manual constant per-clip lift (meters, default 0); mirrors the same
+        # flag in DeepMimicEnv/AMPEnv so a corrected clip can be VISUALLY
+        # verified here before training on it.
+        self._ground_offset = env_config.get("ground_offset", 0.0)
 
         motion_file = env_config["motion_file"]
         self._load_motions(motion_file)
@@ -47,6 +51,7 @@ class ViewMotionEnv(char_env.CharEnv):
                                                 device=self._device,
                                                 auto_ground_offset=self._auto_ground_offset,
                                                 ground_offset_clearance=self._ground_offset_clearance,
+                                                ground_offset=self._ground_offset,
                                                 char_file=self._char_file)
         return
 

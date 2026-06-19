@@ -1,0 +1,97 @@
+# HYBRID DeepMimic + AMP crow (Bakasana). Follow-up to the pure-AMP run
+# (output/yoga_amp_crow): that produced a good-looking crow BUT rested the LEFT
+# toe on the floor -- a balance-friendly local optimum the discriminator tolerates
+# over its 10-step distribution. Fix = add the DeepMimic per-body TRACKING channel
+# (enable_task_tracking): key_pos tracks L_Toe/R_Toe against the reference (toes
+# 0.1-0.39 m UP through the hold), so a toe-rest now COSTS reward. The disc keeps
+# the proximal style that made the pure-AMP pose look good. Pair with
+# data/agents/amp_smpl_handstand_hybrid_agent.yaml (task 1.0 / disc 1.0).
+#
+# CROW-SPECIFIC CAUTIONS:
+#  - force_balance stays OFF: it penalizes hand contact force, i.e. it REWARDS
+#    offloading weight onto the feet -- the very cause of the toe-rest
+#    (attempt-2 post-mortem section 6.1). All farmable aux are off; the fix is
+#    tracking, not balance shaping.
+#  - The hybrid tracks the MOVING reference. init_time_range + episode_length are
+#    set so the reference never advances out of the feet-up hold into the standing
+#    exit (else tracking would reward standing up). Window biased to the late hold
+#    (t~14-23 s) where BOTH toes are clearly up (the early hold has the left toe
+#    as low as 0.09 m, which is what permitted the left-toe-rest).
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands.xml"
+    camera_mode: "track"
+
+    episode_length: 5.0 # seconds; short so the moving reference stays in the hold
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6 # m
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    num_disc_obs_steps: 10
+    enable_task_tracking: True   # <- hybrid: task reward = DeepMimic tracking (+aux)
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+
+    # RSI + disc demos + moving-reference span restricted to the clean feet-up
+    # hold. With episode 5 s, the reference advances at most to ~t=23 s (still
+    # crow, both toes up) and never into the standing exit.
+    init_time_range: [14.0, 18.0]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl/220923_Crane_Crow_Pose_or_Bakasana_-a"
+
+    auto_ground_offset: False
+    ground_offset: 0.0624   # seats the hold's hands at z=0 (measured)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    # Leg-emphasized per-joint tracking weights (crow node set): hips 2.0 / knees
+    # 2.5 so the lift-the-feet action is tracked; arms 1.5-3.0.
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5      # boosted: the direct L_Toe/R_Toe up-position signal
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # All farmable aux OFF. force_balance especially: it rewards the toe-rest.
+    reward_com_support_w: 0.0
+    com_support_bodies: ["R_Hand", "L_Hand"]
+    reward_force_balance_w: 0.0
+    force_balance_bodies: ["R_Hand", "L_Hand"]
+    reward_foot_clear_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_orient_w: 0.0
+    reward_inversion_w: 0.0
+    reward_energy_w: 0.05
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

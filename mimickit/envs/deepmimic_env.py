@@ -128,6 +128,31 @@ class DeepMimicEnv(char_env.CharEnv):
         self._reward_force_balance_scale = env_config.get("reward_force_balance_scale", 1.0)
         self._force_balance_bodies = env_config.get("force_balance_bodies", [])
 
+        # Foot-clearance reward (set weight to 0 to disable; default OFF). Adds
+        # reward_foot_clear_w * exp(-reward_foot_clear_scale * f), where f is the
+        # mean ground-contact-force magnitude over `foot_clear_bodies`, applied
+        # ONLY where the REFERENCE foot is itself lifted (mean ref foot height >
+        # reward_foot_clear_ref_h). Rewards committing the weight to the
+        # hands/arms (feet off the ground) during a feet-up hold (e.g. Bakasana),
+        # without fighting the feet-down entry. Relies on body-body self-collision
+        # being ON (it is, by default) so the upper arms can bear the shins.
+        self._reward_foot_clear_w = env_config.get("reward_foot_clear_w", 0.0)
+        self._reward_foot_clear_scale = env_config.get("reward_foot_clear_scale", 0.1)
+        self._reward_foot_clear_ref_h = env_config.get("reward_foot_clear_ref_h", 0.12)
+        self._foot_clear_bodies = env_config.get("foot_clear_bodies", [])
+
+        # Limb-support reward (set weight to 0 to disable; default OFF). Adds
+        # reward_knee_support_w * exp(-reward_knee_support_scale * d2), where d2
+        # is the mean over `knee_support_bodies` of the squared distance to the
+        # NEAREST `knee_support_target_bodies`. Rewards resting one body set ON
+        # another (e.g. shins/knees on the backs of the upper arms in Bakasana).
+        # Pins the knees on the arms so a foot-clearance push cannot be farmed by
+        # extending the legs away -- together they force the true feet-up tuck.
+        self._reward_knee_support_w = env_config.get("reward_knee_support_w", 0.0)
+        self._reward_knee_support_scale = env_config.get("reward_knee_support_scale", 20.0)
+        self._knee_support_bodies = env_config.get("knee_support_bodies", [])
+        self._knee_support_target_bodies = env_config.get("knee_support_target_bodies", [])
+
         # Energy penalty (set weight to 0 to disable). Adds
         # reward_energy_w * exp(-reward_energy_scale * e), where
         # e = sum_i |tau_i * dq_i| is the total mechanical power (W). This
@@ -164,11 +189,87 @@ class DeepMimicEnv(char_env.CharEnv):
         self._reward_orient_scale = env_config.get("reward_orient_scale", 0.5)
         self._orient_bodies = env_config.get("orient_bodies", [])
 
+        # Toe-lift clearance bonus (set weight to 0 to disable; default OFF).
+        # Adds reward_toe_lift_w * exp(-reward_toe_lift_scale * s), where
+        # s = sum over `toe_lift_bodies` of the SQUARED shortfall
+        # max(0, toe_lift_min_h - h_toe)^2: a ONE-SIDED height penalty that pays
+        # full reward once a toe clears toe_lift_min_h and decays only as a toe
+        # drops toward the floor (no incentive to over-lift past the threshold).
+        # Gated, like foot_clear, to envs whose mean REFERENCE toe height exceeds
+        # toe_lift_ref_h, so it pays ONLY in the feet-up hold and never rewards a
+        # degenerate feet-up motion on a feet-down entry (the early-exploit the
+        # policy could otherwise farm). Directly costs the brief left-toe TAP the
+        # amortized key_pos term tolerates. Tracked as toe_min_clear (min toe
+        # height, live floor-clearance diagnostic) and toe_lift_r.
+        self._reward_toe_lift_w = env_config.get("reward_toe_lift_w", 0.0)
+        self._reward_toe_lift_scale = env_config.get("reward_toe_lift_scale", 100.0)
+        self._toe_lift_min_h = env_config.get("toe_lift_min_h", 0.10)
+        self._toe_lift_ref_h = env_config.get("toe_lift_ref_h", 0.12)
+        self._toe_lift_bodies = env_config.get("toe_lift_bodies", [])
+
+        # Center-of-pressure support reward (set weight to 0 to disable; default
+        # OFF). Adds reward_cop_support_w * exp(-reward_cop_support_scale * d^2),
+        # where d is the horizontal distance from the contact center-of-pressure
+        # to the centroid of `cop_support_bodies` (the hands). CoP_xy is the
+        # vertical-GRF-weighted mean horizontal position over `cop_bodies` (all
+        # candidate contacts: hands + feet): CoP_xy = sum_i xy_i * max(0,Fz_i) /
+        # sum_i max(0,Fz_i). With both toes up the CoP sits at the hands (d~0,
+        # reward ~1); a left-toe tap loads a point BEHIND the hands and drags the
+        # CoP back (d grows, reward drops), so the term rewards leaning forward to
+        # seat ALL weight on the hands. This is the OPPOSITE of force_balance
+        # (which penalizes hand force and thus rewards the toe-rest); cop
+        # CONCENTRATES load on the hands. Gated off when the total vertical
+        # contact force is below cop_min_force (airborne -> CoP undefined).
+        # Tracked as cop_offset (the distance d) and cop_support_r.
+        self._reward_cop_support_w = env_config.get("reward_cop_support_w", 0.0)
+        self._reward_cop_support_scale = env_config.get("reward_cop_support_scale", 10.0)
+        self._cop_min_force = env_config.get("cop_min_force", 10.0)
+        self._cop_bodies = env_config.get("cop_bodies", [])
+        self._cop_support_bodies = env_config.get("cop_support_bodies", [])
+        # Forward bias for the CoP target (meters, default 0 -> exact prior
+        # behavior). Shifts the CoP target FORWARD of the hand centroid, along the
+        # horizontal direction from the root to the hand centroid, so the policy is
+        # rewarded for leaning its weight slightly PAST the hands rather than only
+        # onto them. Moves the balance equilibrium forward off the feet, which is
+        # what removes the need for a rear toe tap to keep from tipping back.
+        self._cop_support_forward_offset = env_config.get("cop_support_forward_offset", 0.0)
+
+        # Toe-force penalty (set weight to 0 to disable; default OFF). SUBTRACTS
+        # reward_toe_force_pen_w * clamp(f / toe_force_pen_cap, 0, 1) where f is the
+        # mean vertical ground-contact force over `toe_force_pen_bodies`. Unlike the
+        # toe_lift HEIGHT bonus and the cop_support MEAN-offset bonus (both of which
+        # a brief intermittent tap barely perturbs over a rollout), this reads the
+        # instantaneous contact FORCE every step, so a single-frame tap -- which
+        # spikes a large recovery force -- incurs the full per-step cost where the
+        # mean-based terms do not. Linear (non-saturating up to the cap) so harder
+        # taps cost proportionally more. Gated, like toe_lift, to the feet-up hold
+        # via the reference toe height so it never fights the feet-down entry.
+        # Tracked as toe_force (mean N) and toe_force_pen_r (the penalty fraction).
+        self._reward_toe_force_pen_w = env_config.get("reward_toe_force_pen_w", 0.0)
+        self._toe_force_pen_cap = env_config.get("toe_force_pen_cap", 50.0)
+        self._toe_force_pen_ref_h = env_config.get("toe_force_pen_ref_h", 0.12)
+        self._toe_force_pen_bodies = env_config.get("toe_force_pen_bodies", [])
+
         self._visualize_ref_char = env_config.get("visualize_ref_char", True)
-        
+
+        # Goal-pose observation (#2, goal-conditioning) + goal-pose distance gate
+        # source. yaml-gated, DEFAULT OFF, so existing pose-node configs and the
+        # policies trained on them (obs dim unchanged) are untouched. When on,
+        # the policy obs gains a block encoding this clip's frame at
+        # goal_phase_time (the target pose) relative to the live root -> the
+        # policy is conditioned on where it is going, which is what lets one
+        # transition architecture generalise across targets. It also exposes the
+        # goal hold pose so the transition env can gate the handoff on a true
+        # pose-distance (spec D) and the eval can be pose-grounded (spec A). The
+        # goal frame is materialized lazily on the first observation (motion lib
+        # + key bodies are both ready by the first reset()).
+        self._enable_goal_obs = env_config.get("enable_goal_obs", False)
+        self._goal_phase_time = env_config.get("goal_phase_time", None)
+        self._goal_root_pos = None  # sentinel: goal frame not yet materialized
+
         super().__init__(config=config, num_envs=num_envs, device=device,
                          visualize=visualize)
-        
+
         return
     
     def get_reward_succ(self):
@@ -273,10 +374,24 @@ class DeepMimicEnv(char_env.CharEnv):
         self._com_support_body_ids = self._build_body_ids_tensor(com_support_bodies)
         force_balance_bodies = self._force_balance_bodies if self._reward_force_balance_w > 0.0 else []
         self._force_balance_body_ids = self._build_body_ids_tensor(force_balance_bodies)
+        foot_clear_bodies = self._foot_clear_bodies if self._reward_foot_clear_w > 0.0 else []
+        self._foot_clear_body_ids = self._build_body_ids_tensor(foot_clear_bodies)
+        knee_support_bodies = self._knee_support_bodies if self._reward_knee_support_w > 0.0 else []
+        self._knee_support_body_ids = self._build_body_ids_tensor(knee_support_bodies)
+        knee_support_targets = self._knee_support_target_bodies if self._reward_knee_support_w > 0.0 else []
+        self._knee_support_target_ids = self._build_body_ids_tensor(knee_support_targets)
         inversion_bodies = self._inversion_bonus_bodies if self._reward_inversion_w > 0.0 else []
         self._inversion_body_ids = self._build_body_ids_tensor(inversion_bodies)
         orient_bodies = self._orient_bodies if self._reward_orient_w > 0.0 else []
         self._orient_body_ids = self._build_body_ids_tensor(orient_bodies)
+        toe_lift_bodies = self._toe_lift_bodies if self._reward_toe_lift_w > 0.0 else []
+        self._toe_lift_body_ids = self._build_body_ids_tensor(toe_lift_bodies)
+        cop_bodies = self._cop_bodies if self._reward_cop_support_w > 0.0 else []
+        self._cop_body_ids = self._build_body_ids_tensor(cop_bodies)
+        cop_support_bodies = self._cop_support_bodies if self._reward_cop_support_w > 0.0 else []
+        self._cop_support_body_ids = self._build_body_ids_tensor(cop_support_bodies)
+        toe_force_pen_bodies = self._toe_force_pen_bodies if self._reward_toe_force_pen_w > 0.0 else []
+        self._toe_force_pen_body_ids = self._build_body_ids_tensor(toe_force_pen_bodies)
 
         # Cache m*g for the cost-of-transport reward. Assumes all envs share
         # the same character (true today since char_file is global), so a
@@ -711,8 +826,95 @@ class DeepMimicEnv(char_env.CharEnv):
                                               margin_cap=self._obs_contact_margin_cap)
             obs = torch.cat([obs, contact_obs], dim=-1)
 
+        if (self._enable_goal_obs):
+            self._ensure_goal_frame()
+            goal_obs = self._compute_goal_obs(root_pos, root_rot)
+            obs = torch.cat([obs, goal_obs], dim=-1)
+
         return obs
-    
+
+    # ---- goal-pose conditioning + pose-distance gate source (yaml-gated) ------
+    def _ensure_goal_frame(self):
+        """Lazily materialize the fixed goal hold pose = this clip's frame at
+        goal_phase_time (the transition env points motion_file at target B, so
+        this is B's hold). Stored once; reused by the goal obs, the pose gate,
+        and the pose-grounded eval."""
+        if (self._goal_root_pos is not None):
+            return
+        assert (self._goal_phase_time is not None), \
+            "enable_goal_obs requires goal_phase_time (seconds into motion_file)"
+        mid = torch.zeros(1, dtype=torch.int64, device=self._device)
+        mt = torch.full((1,), float(self._goal_phase_time), device=self._device, dtype=torch.float32)
+        root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel = \
+            self._motion_lib.calc_motion_frame(mid, mt)
+        body_pos, body_rot = self._kin_char_model.forward_kinematics(root_pos, root_rot, joint_rot)
+        self._goal_root_pos = root_pos                  # [1,3]
+        self._goal_root_rot = root_rot                  # [1,4]
+        self._goal_joint_rot = joint_rot                # [1,J,4]
+        self._goal_body_pos = body_pos                  # [1,B,3]
+        self._goal_body_rot = body_rot                  # [1,B,4]
+        self._goal_dof_pos = self._motion_lib.joint_rot_to_dof(joint_rot)  # [1,dof]
+        if (self._has_key_bodies()):
+            self._goal_key_pos = body_pos[..., self._key_body_ids, :]      # [1,M,3]
+        else:
+            self._goal_key_pos = torch.zeros([0], device=self._device)
+        up = torch.zeros_like(root_pos); up[..., 2] = 1.0
+        self._goal_up_z = torch_util.quat_rotate(root_rot, up)[..., 2]     # [1]
+        return
+
+    def _compute_goal_obs(self, root_pos, root_rot):
+        # Encode the fixed goal hold pose relative to the live root, reusing the
+        # same compute_tar_obs machinery the reference-frame target obs uses
+        # (single frame). Matches the global/local convention of the tar obs.
+        n = root_pos.shape[0]
+        g_root_pos = self._goal_root_pos.expand(n, -1).unsqueeze(1)         # [n,1,3]
+        g_root_rot = self._goal_root_rot.expand(n, -1).unsqueeze(1)         # [n,1,4]
+        g_joint_rot = self._goal_joint_rot.expand(n, -1, -1).unsqueeze(1)   # [n,1,J,4]
+        if (self._has_key_bodies()):
+            g_key_pos = self._goal_key_pos.expand(n, -1, -1).unsqueeze(1)   # [n,1,M,3]
+        else:
+            g_key_pos = torch.zeros([0], device=self._device)
+
+        if (self._global_obs):
+            ref_root_pos = root_pos
+            ref_root_rot = root_rot
+        else:
+            ref_root_pos = g_root_pos[..., 0, :]
+            ref_root_rot = g_root_rot[..., 0, :]
+
+        goal_obs = compute_tar_obs(ref_root_pos=ref_root_pos, ref_root_rot=ref_root_rot,
+                                   root_pos=g_root_pos, root_rot=g_root_rot,
+                                   joint_rot=g_joint_rot, key_pos=g_key_pos,
+                                   global_obs=self._global_obs,
+                                   root_height_obs=self._root_height_obs)
+        goal_obs = goal_obs.reshape(n, -1)
+        return goal_obs
+
+    def _compute_goal_match(self, env_ids=None):
+        """Root-relative per-body shape distance (heading-removed, so
+        inversion/tilt still counts) and up-vector-z error from the live
+        character to the goal hold pose. Used by the transition handoff
+        pose-distance gate (spec D) and the pose-grounded transition eval
+        (spec A). Returns (pose_dist [n], up_z_err [n])."""
+        self._ensure_goal_frame()
+        char_id = self._get_char_id()
+        body_pos = self._engine.get_body_pos(char_id)
+        root_rot = self._engine.get_root_rot(char_id)
+        if (env_ids is not None):
+            body_pos = body_pos[env_ids]
+            root_rot = root_rot[env_ids]
+
+        cur_rel = body_pos[:, 1:, :] - body_pos[:, 0:1, :]
+        cur_local = char_env.convert_to_local_body_pos(root_rot, cur_rel)            # [n,B-1,3]
+        goal_rel = self._goal_body_pos[:, 1:, :] - self._goal_body_pos[:, 0:1, :]
+        goal_local = char_env.convert_to_local_body_pos(self._goal_body_rot[:, 0, :], goal_rel)  # [1,B-1,3]
+        pose_dist = torch.linalg.vector_norm(cur_local - goal_local, dim=-1).mean(dim=-1)  # [n]
+
+        up = torch.zeros_like(root_rot[..., :3]); up[..., 2] = 1.0
+        cur_up_z = torch_util.quat_rotate(root_rot, up)[..., 2]
+        up_z_err = torch.abs(cur_up_z - self._goal_up_z)                             # [n] (bcast)
+        return pose_dist, up_z_err
+
     def _update_reward(self):
         char_id = self._get_char_id()
         root_pos = self._engine.get_root_pos(char_id)
@@ -793,7 +995,10 @@ class DeepMimicEnv(char_env.CharEnv):
         need_gcf = (self._reward_vert_impulse_w > 0.0 and self._vert_impulse_body_ids.shape[0] > 0) \
                    or (self._reward_impulse_w > 0.0 and self._impulse_body_ids.shape[0] > 0) \
                    or (self._reward_force_balance_w > 0.0 and self._force_balance_body_ids.shape[0] > 0) \
-                   or (self._reward_inversion_w > 0.0 and self._inversion_body_ids.shape[0] > 0)
+                   or (self._reward_foot_clear_w > 0.0 and self._foot_clear_body_ids.shape[0] > 0) \
+                   or (self._reward_inversion_w > 0.0 and self._inversion_body_ids.shape[0] > 0) \
+                   or (self._reward_cop_support_w > 0.0 and self._cop_body_ids.shape[0] > 0) \
+                   or (self._reward_toe_force_pen_w > 0.0 and self._toe_force_pen_body_ids.shape[0] > 0)
         if (need_gcf):
             ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
 
@@ -825,6 +1030,37 @@ class DeepMimicEnv(char_env.CharEnv):
                 self._reward_buf, ground_contact_forces)
             reward_components["force_balance_cost"] = fb_cost
             reward_components["force_balance_r"] = force_balance_r
+
+        if (self._reward_foot_clear_w > 0.0 and self._foot_clear_body_ids.shape[0] > 0):
+            self._reward_buf[:], foot_clear_r = self._apply_foot_clear_reward(
+                self._reward_buf, ground_contact_forces)
+            reward_components["foot_clear_r"] = foot_clear_r
+
+        if (self._reward_knee_support_w > 0.0 and self._knee_support_body_ids.shape[0] > 0
+                and self._knee_support_target_ids.shape[0] > 0):
+            self._reward_buf[:], knee_support_d, knee_support_r = self._apply_knee_support_reward(
+                self._reward_buf, body_pos)
+            reward_components["knee_support_d"] = knee_support_d
+            reward_components["knee_support_r"] = knee_support_r
+
+        if (self._reward_toe_lift_w > 0.0 and self._toe_lift_body_ids.shape[0] > 0):
+            self._reward_buf[:], toe_min_clear, toe_lift_r = self._apply_toe_lift_reward(
+                self._reward_buf, body_pos)
+            reward_components["toe_min_clear"] = toe_min_clear
+            reward_components["toe_lift_r"] = toe_lift_r
+
+        if (self._reward_cop_support_w > 0.0 and self._cop_body_ids.shape[0] > 0
+                and self._cop_support_body_ids.shape[0] > 0):
+            self._reward_buf[:], cop_offset, cop_support_r = self._apply_cop_support_reward(
+                self._reward_buf, body_pos, ground_contact_forces)
+            reward_components["cop_offset"] = cop_offset
+            reward_components["cop_support_r"] = cop_support_r
+
+        if (self._reward_toe_force_pen_w > 0.0 and self._toe_force_pen_body_ids.shape[0] > 0):
+            self._reward_buf[:], toe_force, toe_force_pen_r = self._apply_toe_force_penalty(
+                self._reward_buf, body_pos, ground_contact_forces)
+            reward_components["toe_force"] = toe_force
+            reward_components["toe_force_pen_r"] = toe_force_pen_r
 
         if (self._reward_energy_w > 0.0):
             self._reward_buf[:], energy, energy_r = self._apply_energy_reward(
@@ -985,6 +1221,105 @@ class DeepMimicEnv(char_env.CharEnv):
         cost = torch.sum(forces * forces, dim=(-2, -1)) / (self._char_weight ** 2)
         force_balance_r = torch.exp(-self._reward_force_balance_scale * cost)
         return reward_buf + self._reward_force_balance_w * force_balance_r, cost, force_balance_r
+
+    def _apply_foot_clear_reward(self, reward_buf, ground_contact_forces):
+        # Reward lifting the feet OFF the ground during the parts of the clip
+        # where the REFERENCE foot is itself lifted (e.g. the Bakasana hold), so
+        # the policy commits its weight to the hands/arms instead of resting on
+        # its feet (the toe-rest local optimum). foot_clear_r = exp(-scale *
+        # mean ||F_foot||) over foot_clear_bodies, gated to envs whose mean
+        # reference foot height exceeds reward_foot_clear_ref_h so it never
+        # fights the feet-down entry. Returns (new_reward, gated_foot_clear_r).
+        foot_forces = ground_contact_forces[:, self._foot_clear_body_ids, :]
+        mean_force = torch.linalg.vector_norm(foot_forces, dim=-1).mean(dim=-1)
+        foot_clear_r = torch.exp(-self._reward_foot_clear_scale * mean_force)
+        ref_foot_h = self._ref_body_pos[:, self._foot_clear_body_ids, 2].mean(dim=-1)
+        gate = (ref_foot_h > self._reward_foot_clear_ref_h).float()
+        gated = foot_clear_r * gate
+        return reward_buf + self._reward_foot_clear_w * gated, gated
+
+    def _apply_knee_support_reward(self, reward_buf, body_pos):
+        # Reward resting the `knee_support_bodies` (shins/knees) ON the nearest
+        # `knee_support_target_bodies` (upper arms): d2 = mean over knees of the
+        # min squared distance to a target body, rewarded as exp(-scale * d2).
+        # Pairs with the foot-clearance term to force a true Bakasana tuck (knees
+        # on arms AND feet up) instead of the leg-extension that farms foot-clear.
+        # Returns (new_reward, mean_dist, knee_support_r) for the tracker.
+        knees = body_pos[:, self._knee_support_body_ids, :]      # [N, K, 3]
+        arms = body_pos[:, self._knee_support_target_ids, :]     # [N, A, 3]
+        d = torch.linalg.vector_norm(knees.unsqueeze(2) - arms.unsqueeze(1), dim=-1)  # [N,K,A]
+        min_d = d.min(dim=-1).values                             # [N, K]
+        d2 = (min_d * min_d).mean(dim=-1)                        # [N]
+        knee_support_r = torch.exp(-self._reward_knee_support_scale * d2)
+        return reward_buf + self._reward_knee_support_w * knee_support_r, min_d.mean(dim=-1), knee_support_r
+
+    def _apply_toe_lift_reward(self, reward_buf, body_pos):
+        # Height-based bonus for keeping BOTH toes clear of the floor during the
+        # feet-up hold. s = sum over toe_lift_bodies of the squared shortfall
+        # max(0, toe_lift_min_h - h)^2 -> full reward once a toe clears
+        # toe_lift_min_h, decaying only as it drops toward the ground (one-sided:
+        # no reward for over-lifting past the threshold). Gated, like foot_clear,
+        # to envs whose mean REFERENCE toe height exceeds toe_lift_ref_h so it
+        # pays only in the hold and never rewards a feet-up degeneracy on a
+        # feet-down entry. Costs the brief left-toe tap directly. Returns
+        # (new_reward, min_toe_clearance, gated_toe_lift_r) for the tracker.
+        toe_h = body_pos[:, self._toe_lift_body_ids, 2]                  # [N, T]
+        shortfall = torch.clamp(self._toe_lift_min_h - toe_h, min=0.0)  # [N, T]
+        s = torch.sum(shortfall * shortfall, dim=-1)                    # [N]
+        toe_lift_r = torch.exp(-self._reward_toe_lift_scale * s)
+        ref_toe_h = self._ref_body_pos[:, self._toe_lift_body_ids, 2].mean(dim=-1)
+        gate = (ref_toe_h > self._toe_lift_ref_h).float()
+        gated = toe_lift_r * gate
+        min_clear = toe_h.min(dim=-1).values
+        return reward_buf + self._reward_toe_lift_w * gated, min_clear, gated
+
+    def _apply_cop_support_reward(self, reward_buf, body_pos, ground_contact_forces):
+        # Reward seating the contact center-of-pressure over the hands. CoP_xy is
+        # the vertical-GRF-weighted mean horizontal position over cop_bodies (all
+        # candidate contacts); the target is the centroid of cop_support_bodies
+        # (the hands). d^2 = ||CoP_xy - hand_centroid_xy||^2, rewarded as
+        # exp(-scale * d^2). A left-toe tap loads a point behind the hands and
+        # drags the CoP back (d grows), so the term rewards leaning forward to
+        # carry all weight on the hands -- the OPPOSITE of force_balance. Gated
+        # off when total vertical force < cop_min_force (airborne -> CoP
+        # undefined). Returns (new_reward, cop_offset, gated_cop_support_r).
+        fz = ground_contact_forces[:, self._cop_body_ids, 2].clamp(min=0.0)  # [N, B]
+        total_fz = fz.sum(dim=-1)                                            # [N]
+        xy = body_pos[:, self._cop_body_ids, :2]                            # [N, B, 2]
+        cop_xy = (xy * fz.unsqueeze(-1)).sum(dim=1) / total_fz.clamp(min=1e-6).unsqueeze(-1)
+        support_xy = body_pos[:, self._cop_support_body_ids, :2].mean(dim=1)
+        # Optionally bias the target FORWARD of the hand centroid, along the
+        # horizontal root->hands direction, so the rewarded equilibrium sits
+        # slightly past the hands (leaning forward off the feet) rather than
+        # exactly on them. offset 0 -> exact prior behavior.
+        if (self._cop_support_forward_offset != 0.0):
+            root_xy = body_pos[:, 0, :2]
+            fwd = support_xy - root_xy
+            fwd = fwd / torch.linalg.vector_norm(fwd, dim=-1, keepdim=True).clamp(min=1e-6)
+            support_xy = support_xy + self._cop_support_forward_offset * fwd
+        offset_sq = torch.sum((cop_xy - support_xy) ** 2, dim=-1)
+        cop_support_r = torch.exp(-self._reward_cop_support_scale * offset_sq)
+        gate = (total_fz > self._cop_min_force).float()
+        gated = cop_support_r * gate
+        cop_offset = torch.sqrt(offset_sq.clamp(min=0.0)) * gate
+        return reward_buf + self._reward_cop_support_w * gated, cop_offset, gated
+
+    def _apply_toe_force_penalty(self, reward_buf, body_pos, ground_contact_forces):
+        # Per-step penalty on toe ground-contact force: SUBTRACT
+        # reward_toe_force_pen_w * clamp(f / cap, 0, 1), f = mean vertical GRF over
+        # toe_force_pen_bodies. Event-sensitive (reads instantaneous force), so a
+        # brief tap -- which spikes a recovery force -- is penalized that very step,
+        # unlike the toe_lift HEIGHT bonus / cop_support MEAN-offset bonus that a
+        # 1-3 frame tap barely moves over a rollout. Gated, like toe_lift, to the
+        # feet-up hold via the reference toe height so it never fights the feet-down
+        # entry. Returns (new_reward, toe_force_mean, gated_penalty_fraction).
+        fz = ground_contact_forces[:, self._toe_force_pen_body_ids, 2].clamp(min=0.0)  # [N, T]
+        toe_force = fz.mean(dim=-1)                                                     # [N]
+        pen = torch.clamp(toe_force / self._toe_force_pen_cap, min=0.0, max=1.0)
+        ref_toe_h = self._ref_body_pos[:, self._toe_force_pen_body_ids, 2].mean(dim=-1)
+        gate = (ref_toe_h > self._toe_force_pen_ref_h).float()
+        gated = pen * gate
+        return reward_buf - self._reward_toe_force_pen_w * gated, toe_force, gated
 
     def _apply_orient_reward(self, reward_buf, char_id):
         # Task-space world-orientation tracking of the listed key bodies (e.g.

@@ -61,6 +61,14 @@ class BaseAgent(torch.nn.Module):
         while self._sample_count < max_samples:
             train_info = self._train_iter()
 
+            # NaN-guard: PPOAgent._update_model flags divergence on a non-finite
+            # loss and skips the corrupting optimizer step. Abort here, BEFORE
+            # the per-iter save() below overwrites out_model_file, so the last
+            # healthy model.pt (and the numbered int/ snapshot) survive intact.
+            if (getattr(self, "_diverged", False)):
+                Logger.print("[NaN-guard] non-finite loss at iter {}: aborting training to preserve the last healthy checkpoint ({}) and int/ snapshots.".format(self._iter, out_model_file))
+                break
+
             self._sample_count = self._update_sample_count()
             output_iter = (self._iter % self._iters_per_output == 0) or (self._sample_count >= max_samples)
 
@@ -232,6 +240,7 @@ class BaseAgent(torch.nn.Module):
     def _init_train(self):
         self._iter = 0
         self._sample_count = 0
+        self._diverged = False
         self._exp_buffer.clear()
         self._train_return_tracker.reset()
         self._test_return_tracker.reset()

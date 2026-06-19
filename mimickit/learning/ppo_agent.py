@@ -159,6 +159,18 @@ class PPOAgent(base_agent.BaseAgent):
                 batch = self._exp_buffer.sample(batch_size)
                 loss_info = self._compute_loss(batch)
                 loss = loss_info["loss"]
+
+                # NaN-guard: a non-finite loss (e.g. a critic explosion) would
+                # corrupt every weight on the next optimizer step and then the
+                # run silently spins for hours producing NaNs. Skip the step and
+                # flag the run as diverged; BaseAgent.train_model aborts at the
+                # iter boundary while the last healthy checkpoint is still
+                # intact. Still logged (the NaN surfaces in Critic_Loss).
+                if (not torch.isfinite(loss)):
+                    self._diverged = True
+                    torch_util.add_torch_dict(loss_info, train_info)
+                    continue
+
                 self._optimizer.step(loss)
 
                 torch_util.add_torch_dict(loss_info, train_info)

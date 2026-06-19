@@ -24,6 +24,9 @@ def build_env(env_file, num_envs, device, visualize):
     elif (env_name == "add"):
         import envs.add_env as add_env
         env = add_env.ADDEnv(config=env_config, num_envs=num_envs, device=device, visualize=visualize)
+    elif (env_name == "transition"):
+        import envs.transition_env as transition_env
+        env = transition_env.TransitionEnv(config=env_config, num_envs=num_envs, device=device, visualize=visualize)
     elif (env_name == "char_dof_test"):
         import envs.char_dof_test_env as char_dof_test_env
         env = char_dof_test_env.CharDofTestEnv(config=env_config, num_envs=num_envs, device=device, visualize=visualize)

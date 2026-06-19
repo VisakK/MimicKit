@@ -1,0 +1,122 @@
+# THIRD finetune of the hybrid crow (resume from
+# output/model_yoga_amp_crow_hybrid_ft2.pt -- the SECOND finetune's output). The
+# ft2 run drove the left-toe tap out: toes clear (toe_min_clear ~0.97), CoP seats
+# on the hands (cop_support_r ~0.97), Test_Return 374 -> 380. BUT the policy still
+# fails to settle into a STABLE inverted hold: on inspection the knees do not make
+# stable contact with the backs of the upper arms, the shelf that carries the
+# load in Bakasana. Pose tracking alone leaves that precise knee-on-arm contact as
+# an unstable equilibrium that small tracking errors break out of.
+#
+# This run adds the (already-implemented, until-now disabled) knee_support term to
+# create a dense attractor pinning the shins onto the upper arms:
+#
+#   reward_knee_support_w   0.0 -> 0.4    (on par with cop_support 0.5)
+#   reward_knee_support_scale 20.0        (default; ~0.64 at 0.15m, ~0.82 at 0.10m)
+#   knee_support_bodies        [L_Knee, R_Knee]      (shin segments)
+#   knee_support_target_bodies [L_Shoulder, R_Shoulder]  (upper-arm segments)
+#
+# The term is KINEMATIC (min knee->arm squared distance, exp(-scale*d2)), not
+# force-based -- a dense, unambiguous signal where the amortized pose kernel is
+# weakest, the same reason toe_lift/key_pos were added as direct signals. It has
+# NO gate, but that is safe: when the knees are far (entry/setup) exp(-d2)~=0, so
+# it cannot distort the approach; it only rewards once they close. It also pairs
+# with toe_lift -- pinning knees-on-arms blocks the leg-extension that a
+# foot-clearance push could otherwise farm. Everything else verbatim from
+# amp_smpl_crow_hybrid_ft2_env.yaml (toe_lift/cop_support kept at the ft2 values).
+# Same agent (task 1.0 / disc 1.0).
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands.xml"
+    camera_mode: "track"
+
+    episode_length: 5.0 # seconds; short so the moving reference stays in the hold
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6 # m
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    num_disc_obs_steps: 10
+    enable_task_tracking: True   # hybrid: task reward = DeepMimic tracking (+aux)
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+
+    init_time_range: [14.0, 18.0]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl/220923_Crane_Crow_Pose_or_Bakasana_-a"
+
+    auto_ground_offset: False
+    ground_offset: 0.0624   # seats the hold's hands at z=0 (measured)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5      # the direct L_Toe/R_Toe up-position signal
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- tap-killer terms (kept verbatim from ft2; the tap is fixed) ---
+    reward_toe_lift_w: 0.45
+    reward_toe_lift_scale: 100.0
+    toe_lift_min_h: 0.10
+    toe_lift_ref_h: 0.12
+    toe_lift_bodies: ["L_Toe", "R_Toe"]
+
+    reward_cop_support_w: 0.5
+    reward_cop_support_scale: 15.0
+    cop_min_force: 10.0
+    cop_bodies: ["L_Hand", "R_Hand", "L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    cop_support_bodies: ["L_Hand", "R_Hand"]
+
+    # --- NEW (3rd finetune): knee-on-upper-arm shelf for a stable hold ---
+    # Dense kinematic attractor: mean min squared distance from each shin (L/R_Knee)
+    # to the nearest upper-arm (L/R_Shoulder), rewarded exp(-scale * d2). Pins the
+    # knees onto the arms so the inversion has the load-bearing shelf it was
+    # missing. Self-limiting (pays ~0 when far, so no entry-phase distortion).
+    reward_knee_support_w: 0.4
+    reward_knee_support_scale: 20.0
+    knee_support_bodies: ["L_Knee", "R_Knee"]
+    knee_support_target_bodies: ["L_Shoulder", "R_Shoulder"]
+
+    # All other aux OFF (force_balance especially: it rewards the toe-rest).
+    reward_com_support_w: 0.0
+    com_support_bodies: ["R_Hand", "L_Hand"]
+    reward_force_balance_w: 0.0
+    force_balance_bodies: ["R_Hand", "L_Hand"]
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_inversion_w: 0.0
+    reward_energy_w: 0.05
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+
+    ground_contact_height: 0.3

@@ -12,6 +12,14 @@ env:
 
     motion_file: "data/motions/smpl/220923_Crane_Crow_Pose_or_Bakasana_-a"
 
+    # Per-clip z-correction (meters). Measured offline with
+    # tools/measure_ground_offset.py: the raw Bakasana-a clip penetrates the
+    # floor everywhere (feet ~2.4 cm at the standing entry, hands ~6.2 cm
+    # through the t~11-23 s balance hold). +0.0624 m seats the hold's hands
+    # exactly at z=0 (the standing entry then floats ~3.8 cm). Set to 0.0 to
+    # watch the RAW penetrating clip for comparison.
+    ground_offset: 0.0624
+
 
 engine:
     engine_name: "isaac_lab"

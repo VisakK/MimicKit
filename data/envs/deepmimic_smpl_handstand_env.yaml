@@ -1,0 +1,112 @@
+# Full-clip DeepMimic handstand run with a task-space hand-orientation reward.
+# Goal: keep DeepMimic's clean kick-up + stable hold, but fix the wrong
+# balancing arm posture (fingers-inward / proximal internal-rotation that the
+# saturating joint-space pose kernel never penalized). Derived from
+# deepmimic_smpl_handstand_contactobs_env.yaml with three changes vs the
+# (hold-window) realism run:
+#   1) init_time_range REMOVED  -> uniform RSI over the whole 97.9 s clip, so
+#      the kick-up is trained/seen again (DeepMimic tracks it fine; no AMP-style
+#      mode collapse).
+#   2) ground_offset (constant 2 cm, hold-window-only) REPLACED by
+#      auto_ground_offset (geometry-aware whole-clip lift) -> the reset
+#      depenetration jerk is killed across the WHOLE clip, not just the hold
+#      window (full-clip RSI lands on penetrating kick-up/stand frames too).
+#   3) reward_orient_* enabled over the hands (the actual fix; see below).
+# Plus episode_length 20 -> 40 s so returns don't saturate at the 400M budget
+# (the realism run censored at 550/600 of a 600-step cap).
+env_name: "deepmimic"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands.xml"
+    camera_mode: "track"
+
+    episode_length: 40.0 # seconds (raised from 20: 400M budget + EpLen was censored)
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6 # m
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    log_tracking_error: False
+    log_ground_contact_forces: False
+    log_joint_torques: False
+    log_dir: "output/diagnostics"
+    log_tag: "smpl_handstand_orient"
+    log_save_interval: 100
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # terminate when hip/trunk (or upper body) touches the ground
+
+    motion_file: "data/motions/smpl/220923_Handstand_pose_or_Adho_Mukha_Vrksasana_-a"
+
+    # Geometry-aware whole-clip lift: clears the deepest collision-geom
+    # penetration over the ENTIRE clip (the constant 2 cm hold-window offset
+    # left ~3.1 cm penetration elsewhere). Full-clip RSI resets onto kick-up
+    # and stand frames too, so the jerk fix must cover the whole clip.
+    auto_ground_offset: True
+    ground_offset_clearance: 0.0
+    # init_time_range intentionally omitted -> uniform RSI over the full clip.
+
+    # Contact-aware observation block (carried over from the realism run):
+    # per-body contact flags, support-polygon margin, and contact graph over
+    # the extremity bodies.
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    # Arm chain weights UNCHANGED from the realism run (the fix this run tests
+    # is the task-space orientation reward below, not joint reweighting).
+    joint_err_w: [1.0, 0.6, 0.4, 0.3, 1.0, 0.6, 0.4, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.15
+
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # Symmetry / load-balancing terms for the hand-supported hold (both
+    # additive bonuses; set weight to 0 to disable). See deepmimic_env.py.
+    reward_com_support_w: 1.0
+    reward_com_support_scale: 10.0
+    com_support_bodies: ["R_Hand", "L_Hand"]
+    reward_force_balance_w: 0.75
+    reward_force_balance_scale: 1.0
+    force_balance_bodies: ["R_Hand", "L_Hand"]
+    reward_energy_w: 0.25
+    reward_energy_scale: 0.001
+
+    # THE FIX: task-space world-orientation reward on the hands. Targets the
+    # observable fingers-inward yaw directly (the proximal internal-rotation
+    # error the saturating joint-space pose kernel never paid to correct).
+    # w=0.5 (== pose_w, a first-class term) / scale=0.5 calibrated for the
+    # ~80 deg/hand defect; logged as Orient_R / Orient_Err. This weight is the
+    # key knob: if the policy keeps the inward cheat (it trades correct arms
+    # for easier elbow-driven COP control), raise reward_orient_w toward 1.0.
+    reward_orient_w: 0.5
+    reward_orient_scale: 0.5
+    orient_bodies: ["R_Hand", "L_Hand"]
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

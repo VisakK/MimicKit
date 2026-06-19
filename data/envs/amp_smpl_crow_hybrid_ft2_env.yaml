@@ -1,0 +1,114 @@
+# SECOND finetune of the hybrid crow (resume from
+# output/model_yoga_amp_crow_hybrid_ft.pt -- the FIRST finetune's output). That
+# run moved everything the right way but only GENTLY (0.25 weights): toes rode
+# higher (min-clear 0.119 -> 0.175 m), CoP crept toward the hands (offset 0.159
+# -> 0.141 m), style preserved -- but the LEFT-TOE TAP persists at lower
+# frequency. The fix nudged, it didn't force. This run pushes the same two terms
+# harder to drive the tap out, resuming from the (good, leaning) ft model:
+#
+#   reward_toe_lift_w   0.25 -> 0.45   (each tap step costs ~2x more)
+#   reward_cop_support_w 0.25 -> 0.5   (2x stronger lean-onto-hands incentive)
+#   reward_cop_support_scale 10 -> 15  (sharper gradient: at the current 0.141 m
+#                                       offset, cop_r drops 0.82 -> 0.69, so
+#                                       reducing the offset pays more)
+#
+# Both pushes are self-limiting / low-risk: toe_lift is ONE-SIDED (no reward for
+# over-lifting past toe_lift_min_h), and cop_support targets the CoP AT the hand
+# centroid (leaning PAST the hands grows the offset again), so neither rewards an
+# over-correction. Tracking + disc still anchor the pose. If the tap survives
+# THIS, the next lever is a tighter toe_lift_min_h or a CoP target biased forward
+# of the hand centroid rather than yet more weight. Everything else verbatim from
+# amp_smpl_crow_hybrid_ft_env.yaml. Same agent (task 1.0 / disc 1.0).
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands.xml"
+    camera_mode: "track"
+
+    episode_length: 5.0 # seconds; short so the moving reference stays in the hold
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6 # m
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    num_disc_obs_steps: 10
+    enable_task_tracking: True   # hybrid: task reward = DeepMimic tracking (+aux)
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+
+    init_time_range: [14.0, 18.0]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl/220923_Crane_Crow_Pose_or_Bakasana_-a"
+
+    auto_ground_offset: False
+    ground_offset: 0.0624   # seats the hold's hands at z=0 (measured)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5      # the direct L_Toe/R_Toe up-position signal
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- STRONGER tap-killer terms (2nd finetune) ---
+    # Toe-lift clearance bonus: weight up 0.25 -> 0.45 so every tap step costs
+    # ~2x more. scale/threshold unchanged (a toe at the floor still gives ~0.37,
+    # both down ~0.14, both clear 1.0).
+    reward_toe_lift_w: 0.45
+    reward_toe_lift_scale: 100.0
+    toe_lift_min_h: 0.10
+    toe_lift_ref_h: 0.12
+    toe_lift_bodies: ["L_Toe", "R_Toe"]
+
+    # Center-of-pressure -> hands: weight up 0.25 -> 0.5 and scale up 10 -> 15 to
+    # sharpen the lean gradient near the current 0.141 m offset (cop_r 0.82 ->
+    # 0.69 there, so leaning further forward pays more). Self-limiting: targets
+    # the CoP AT the hand centroid, so over-leaning is not rewarded.
+    reward_cop_support_w: 0.5
+    reward_cop_support_scale: 15.0
+    cop_min_force: 10.0
+    cop_bodies: ["L_Hand", "R_Hand", "L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    cop_support_bodies: ["L_Hand", "R_Hand"]
+
+    # All other aux OFF (force_balance especially: it rewards the toe-rest).
+    reward_com_support_w: 0.0
+    com_support_bodies: ["R_Hand", "L_Hand"]
+    reward_force_balance_w: 0.0
+    force_balance_bodies: ["R_Hand", "L_Hand"]
+    reward_foot_clear_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_orient_w: 0.0
+    reward_inversion_w: 0.0
+    reward_energy_w: 0.05
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3
