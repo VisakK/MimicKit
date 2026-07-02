@@ -65,6 +65,14 @@ class IsaacLabEngine(engine.Engine):
         else:
             self._control_mode = engine.ControlMode.none
 
+        # Optional per-contact-point tracking on the ground contact sensors
+        # (default OFF -> training runs unaffected). When on, the sensors also
+        # report contact_pos_w (the average contact-point location per body vs
+        # the ground filter), which the analysis tools use to recover the
+        # within-palm load centroid. Adds a small per-step cost, so it is gated.
+        self._track_contact_points = config.get("enable_contact_points", False)
+        self._max_contact_points = config.get("max_contact_points_per_prim", 8)
+
         self._build_ground()
         self._env_offsets = self._compute_env_offsets(num_envs)
 
@@ -313,6 +321,19 @@ class IsaacLabEngine(engine.Engine):
         forces = sensor.data.force_matrix_w
         forces = forces.sum(dim=-2)
         return forces
+
+    def get_ground_contact_points(self, obj_id):
+        # Average contact-point location per body against the ground, in world
+        # frame: shape [N_env, N_bodies, 3]. NaN where a body is not in contact.
+        # Requires enable_contact_points (track_contact_points) in the engine
+        # config; returns None otherwise. The ground filter is a single prim, so
+        # we collapse the filter dim by taking its (only) entry.
+        sensor = self._ground_contact_sensors[obj_id]
+        contact_pos = sensor.data.contact_pos_w
+        if (contact_pos is None):
+            return None
+        # [N, B, M, 3] -> take the ground filter entry (M=1 for our ground).
+        return contact_pos[:, :, 0, :]
     
     def set_root_pos(self, env_id, obj_id, root_pos):
         obj = self._objs[obj_id]
@@ -987,9 +1008,15 @@ class IsaacLabEngine(engine.Engine):
                 # "pelvis"/"Pelvis" (shipped humanoid.usd, locally converted
                 # assets - named after the root body).
                 regex = OBJ_PATH_TEMPLATE.format(".*", obj_id) + "/(robot|pelvis|Pelvis)/.*"
-                sensor_cfg = ContactSensorCfg(prim_path=regex, 
-                                              update_period=timestep,
-                                              filter_prim_paths_expr=filter_prim_paths)
+                sensor_kwargs = dict(prim_path=regex,
+                                     update_period=timestep,
+                                     filter_prim_paths_expr=filter_prim_paths)
+                if (self._track_contact_points):
+                    # contact_pos_w (avg contact point per body vs ground) needs
+                    # both of these set; requires a non-empty filter (we have one).
+                    sensor_kwargs["track_contact_points"] = True
+                    sensor_kwargs["max_contact_data_count_per_prim"] = self._max_contact_points
+                sensor_cfg = ContactSensorCfg(**sensor_kwargs)
                 sensor = ContactSensor(sensor_cfg)
             else:
                 sensor = None

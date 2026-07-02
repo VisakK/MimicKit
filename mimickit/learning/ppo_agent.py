@@ -100,7 +100,12 @@ class PPOAgent(base_agent.BaseAgent):
         
         norm_next_obs = self._obs_norm.normalize(next_obs)
         next_critic_inputs = {"obs": norm_next_obs}
-        next_vals = torch_util.eval_minibatch(self._model.eval_critic, next_critic_inputs, self._critic_eval_batch_size)
+        # Value targets only (detached below). no_grad avoids retaining the critic's
+        # autograd graph over the whole rollout buffer -- negligible for an MLP but
+        # OOMs an attention critic (it keeps every layer's activations). Matches the
+        # codebase's eval pattern (base_agent/amp_agent already wrap evals).
+        with torch.no_grad():
+            next_vals = torch_util.eval_minibatch(self._model.eval_critic, next_critic_inputs, self._critic_eval_batch_size)
         next_vals = next_vals.squeeze(-1).detach()
 
         succ_val = self._compute_succ_val()
@@ -115,7 +120,8 @@ class PPOAgent(base_agent.BaseAgent):
 
         norm_obs = self._obs_norm.normalize(obs)
         critic_inputs = {"obs": norm_obs}
-        vals = torch_util.eval_minibatch(self._model.eval_critic, critic_inputs, self._critic_eval_batch_size)
+        with torch.no_grad():
+            vals = torch_util.eval_minibatch(self._model.eval_critic, critic_inputs, self._critic_eval_batch_size)
         vals = vals.squeeze(-1).detach()
         adv = new_vals - vals
         

@@ -117,9 +117,10 @@ class Engine:
     def get_ground_contact_forces(self, obj_id):
         return
 
-    @abc.abstractmethod
-    def get_ground_contact_forces(self, obj_id):
-        return
+    def get_ground_contact_points(self, obj_id):
+        # Optional: average ground contact-point location per body. Engines that
+        # do not support per-contact-point tracking return None.
+        return None
 
     
     @abc.abstractmethod

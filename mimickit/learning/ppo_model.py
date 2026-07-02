@@ -38,16 +38,18 @@ class PPOModel(base_model.BaseModel):
         net_name = config["actor_net"]
         input_dict = self._build_actor_input_dict(env)
         self._actor_layers, layers_info = net_builder.build_net(net_name, input_dict,
-                                                                activation=self._activation)
-        
+                                                                activation=self._activation,
+                                                                info=(config, env))
+
         self._action_dist = self._build_action_distribution(config, env, self._actor_layers)
         return
-    
+
     def _build_critic(self, config, env):
         net_name = config["critic_net"]
         input_dict = self._build_critic_input_dict(env)
         self._critic_layers, layers_info = net_builder.build_net(net_name, input_dict,
-                                                                 activation=self._activation)
+                                                                 activation=self._activation,
+                                                                 info=(config, env))
 
         layers_out_size = torch_util.calc_layers_out_size(self._critic_layers)
         self._critic_out = torch.nn.Linear(layers_out_size, 1)

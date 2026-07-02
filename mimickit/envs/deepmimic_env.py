@@ -153,6 +153,32 @@ class DeepMimicEnv(char_env.CharEnv):
         self._knee_support_bodies = env_config.get("knee_support_bodies", [])
         self._knee_support_target_bodies = env_config.get("knee_support_target_bodies", [])
 
+        # Knee-on-arm CONTACT-FORCE reward (set weight to 0 to disable; default
+        # OFF). The LOAD analog of knee_support (which rewards only DISTANCE):
+        # rewards the `knee_force_bodies` (the left shin/knee) actually BEARING
+        # weight on their support arm -- f = ||net_contact - ground_contact|| (the
+        # body-to-body force on the knee, i.e. the shin-on-arm load), rewarded as
+        # clamp(f / knee_force_target, 0, 1) (linear up to the target, then flat so
+        # it cannot be farmed by slamming). knee_support seats the shin NEAR the arm
+        # but a 0 N hover lets the policy prop on a planted toe instead; this term
+        # gives the shin-on-arm shelf a real load path that replaces the toe.
+        # Tracked as knee_force (mean N) and knee_force_r.
+        self._reward_knee_force_w = env_config.get("reward_knee_force_w", 0.0)
+        self._knee_force_target = env_config.get("knee_force_target", 100.0)
+        self._knee_force_bodies = env_config.get("knee_force_bodies", [])
+
+        # Leg-straightness reward (set weight to 0 to disable; default OFF). Adds
+        # reward_leg_straight_w * (1 - cos(theta_knee)) / 2, theta_knee = the angle
+        # at the MIDDLE body of `leg_straight_bodies` ([hip, knee, ankle]) -- the
+        # knee bend. A straight leg puts hip and ankle on opposite sides of the knee
+        # (v1,v2 antiparallel, cos=-1 -> reward 1); a folded knee has cos -> +1 ->
+        # reward 0. A DEDICATED kernel (not buried in the shared pose sum, where one
+        # joint's error sits on the saturating tail) so the right knee actually
+        # straightens for the extended one-legged crow. Tracked as knee_angle (deg)
+        # and leg_straight_r.
+        self._reward_leg_straight_w = env_config.get("reward_leg_straight_w", 0.0)
+        self._leg_straight_bodies = env_config.get("leg_straight_bodies", [])
+
         # Energy penalty (set weight to 0 to disable). Adds
         # reward_energy_w * exp(-reward_energy_scale * e), where
         # e = sum_i |tau_i * dq_i| is the total mechanical power (W). This
@@ -233,6 +259,15 @@ class DeepMimicEnv(char_env.CharEnv):
         # onto them. Moves the balance equilibrium forward off the feet, which is
         # what removes the need for a rear toe tap to keep from tipping back.
         self._cop_support_forward_offset = env_config.get("cop_support_forward_offset", 0.0)
+        # Lateral (character-LEFT) bias for the CoP target (meters, default 0 ->
+        # exact prior behavior). Shifts the CoP target to the character's LEFT,
+        # along the horizontal direction 90deg left of forward (= cross(world_up,
+        # root->hands)), so the policy is rewarded for leaning its weight onto the
+        # LEFT hand. This is the balance bias for the one-legged crow: with the
+        # RIGHT leg extended out, seating the center-of-pressure slightly left
+        # (over the loaded left hand + left-knee shelf) counters the cantilevered
+        # right leg. Composes additively with the forward offset.
+        self._cop_support_left_offset = env_config.get("cop_support_left_offset", 0.0)
 
         # Toe-force penalty (set weight to 0 to disable; default OFF). SUBTRACTS
         # reward_toe_force_pen_w * clamp(f / toe_force_pen_cap, 0, 1) where f is the
@@ -249,6 +284,12 @@ class DeepMimicEnv(char_env.CharEnv):
         self._toe_force_pen_cap = env_config.get("toe_force_pen_cap", 50.0)
         self._toe_force_pen_ref_h = env_config.get("toe_force_pen_ref_h", 0.12)
         self._toe_force_pen_bodies = env_config.get("toe_force_pen_bodies", [])
+        # How to reduce the per-body toe/ankle force into the penalized scalar:
+        # "mean" (default, prior behavior) averages over toe_force_pen_bodies, which
+        # DILUTES a single planted foot by the body count (a 4-body mean turns an
+        # 85 N plant into ~21 N, so a high cap barely penalizes it); "max" penalizes
+        # the WORST single foot, so one planted toe is caught at its true force.
+        self._toe_force_pen_reduce = env_config.get("toe_force_pen_reduce", "mean")
 
         self._visualize_ref_char = env_config.get("visualize_ref_char", True)
 
@@ -380,6 +421,10 @@ class DeepMimicEnv(char_env.CharEnv):
         self._knee_support_body_ids = self._build_body_ids_tensor(knee_support_bodies)
         knee_support_targets = self._knee_support_target_bodies if self._reward_knee_support_w > 0.0 else []
         self._knee_support_target_ids = self._build_body_ids_tensor(knee_support_targets)
+        knee_force_bodies = self._knee_force_bodies if self._reward_knee_force_w > 0.0 else []
+        self._knee_force_body_ids = self._build_body_ids_tensor(knee_force_bodies)
+        leg_straight_bodies = self._leg_straight_bodies if self._reward_leg_straight_w > 0.0 else []
+        self._leg_straight_body_ids = self._build_body_ids_tensor(leg_straight_bodies)
         inversion_bodies = self._inversion_bonus_bodies if self._reward_inversion_w > 0.0 else []
         self._inversion_body_ids = self._build_body_ids_tensor(inversion_bodies)
         orient_bodies = self._orient_bodies if self._reward_orient_w > 0.0 else []
@@ -998,7 +1043,8 @@ class DeepMimicEnv(char_env.CharEnv):
                    or (self._reward_foot_clear_w > 0.0 and self._foot_clear_body_ids.shape[0] > 0) \
                    or (self._reward_inversion_w > 0.0 and self._inversion_body_ids.shape[0] > 0) \
                    or (self._reward_cop_support_w > 0.0 and self._cop_body_ids.shape[0] > 0) \
-                   or (self._reward_toe_force_pen_w > 0.0 and self._toe_force_pen_body_ids.shape[0] > 0)
+                   or (self._reward_toe_force_pen_w > 0.0 and self._toe_force_pen_body_ids.shape[0] > 0) \
+                   or (self._reward_knee_force_w > 0.0 and self._knee_force_body_ids.shape[0] > 0)
         if (need_gcf):
             ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
 
@@ -1042,6 +1088,18 @@ class DeepMimicEnv(char_env.CharEnv):
                 self._reward_buf, body_pos)
             reward_components["knee_support_d"] = knee_support_d
             reward_components["knee_support_r"] = knee_support_r
+
+        if (self._reward_knee_force_w > 0.0 and self._knee_force_body_ids.shape[0] > 0):
+            self._reward_buf[:], knee_force, knee_force_r = self._apply_knee_force_reward(
+                self._reward_buf, char_id, ground_contact_forces)
+            reward_components["knee_force"] = knee_force
+            reward_components["knee_force_r"] = knee_force_r
+
+        if (self._reward_leg_straight_w > 0.0 and self._leg_straight_body_ids.shape[0] >= 3):
+            self._reward_buf[:], knee_angle, leg_straight_r = self._apply_leg_straight_reward(
+                self._reward_buf, body_pos)
+            reward_components["knee_angle"] = knee_angle
+            reward_components["leg_straight_r"] = leg_straight_r
 
         if (self._reward_toe_lift_w > 0.0 and self._toe_lift_body_ids.shape[0] > 0):
             self._reward_buf[:], toe_min_clear, toe_lift_r = self._apply_toe_lift_reward(
@@ -1253,6 +1311,40 @@ class DeepMimicEnv(char_env.CharEnv):
         knee_support_r = torch.exp(-self._reward_knee_support_scale * d2)
         return reward_buf + self._reward_knee_support_w * knee_support_r, min_d.mean(dim=-1), knee_support_r
 
+    def _apply_knee_force_reward(self, reward_buf, char_id, ground_contact_forces):
+        # Reward the knee_force_bodies BEARING LOAD on their support arm. The
+        # body-to-body force on the knee is net_contact - ground_contact (the knee
+        # touches only the arm, so this isolates the shin-on-arm load even if the
+        # knee also brushed the ground). Rewarded as clamp(f / target, 0, 1): a
+        # linear ramp giving gradient toward a real load, capped at the target so it
+        # cannot be farmed by slamming. The LOAD partner of knee_support's DISTANCE
+        # term -- it gives the shin-on-arm shelf a load path that replaces a planted
+        # toe. Returns (new_reward, mean_force, knee_force_r).
+        net = self._engine.get_contact_forces(char_id)[:, self._knee_force_body_ids, :]
+        b2b = net - ground_contact_forces[:, self._knee_force_body_ids, :]
+        f = torch.linalg.vector_norm(b2b, dim=-1).mean(dim=-1)                 # [N]
+        knee_force_r = torch.clamp(f / self._knee_force_target, min=0.0, max=1.0)
+        return reward_buf + self._reward_knee_force_w * knee_force_r, f, knee_force_r
+
+    def _apply_leg_straight_reward(self, reward_buf, body_pos):
+        # Reward straightening the knee: theta = angle at the MIDDLE body (the knee)
+        # of the [hip, knee, ankle] chain. v1 = hip - knee, v2 = ankle - knee; a
+        # straight leg puts hip and ankle on opposite sides of the knee so v1,v2 are
+        # antiparallel (cos=-1) and the reward (1 - cos)/2 = 1; a folded knee has
+        # cos -> +1 -> reward 0. A separate kernel (not the shared pose sum) so the
+        # knee gets dedicated straightening gradient. Returns (new_reward,
+        # knee_angle_deg, leg_straight_r).
+        a = body_pos[:, self._leg_straight_body_ids[0], :]
+        b = body_pos[:, self._leg_straight_body_ids[1], :]
+        c = body_pos[:, self._leg_straight_body_ids[2], :]
+        v1 = a - b
+        v2 = c - b
+        cos = (v1 * v2).sum(dim=-1) / (torch.linalg.vector_norm(v1, dim=-1)
+                                       * torch.linalg.vector_norm(v2, dim=-1) + 1e-6)
+        leg_straight_r = (1.0 - cos) / 2.0
+        knee_angle = torch.rad2deg(torch.acos(cos.clamp(-1.0, 1.0)))
+        return reward_buf + self._reward_leg_straight_w * leg_straight_r, knee_angle, leg_straight_r
+
     def _apply_toe_lift_reward(self, reward_buf, body_pos):
         # Height-based bonus for keeping BOTH toes clear of the floor during the
         # feet-up hold. s = sum over toe_lift_bodies of the squared shortfall
@@ -1288,15 +1380,20 @@ class DeepMimicEnv(char_env.CharEnv):
         xy = body_pos[:, self._cop_body_ids, :2]                            # [N, B, 2]
         cop_xy = (xy * fz.unsqueeze(-1)).sum(dim=1) / total_fz.clamp(min=1e-6).unsqueeze(-1)
         support_xy = body_pos[:, self._cop_support_body_ids, :2].mean(dim=1)
-        # Optionally bias the target FORWARD of the hand centroid, along the
-        # horizontal root->hands direction, so the rewarded equilibrium sits
-        # slightly past the hands (leaning forward off the feet) rather than
-        # exactly on them. offset 0 -> exact prior behavior.
-        if (self._cop_support_forward_offset != 0.0):
+        # Optionally bias the target off the hand centroid: FORWARD (along the
+        # horizontal root->hands direction) and/or to the character's LEFT (the
+        # horizontal direction 90deg left of forward, = cross(world_up, fwd)).
+        # Forward moves the rewarded equilibrium slightly past the hands (leaning
+        # off the feet, no rear toe tap); left leans the support onto the left
+        # hand (the one-legged-crow balance bias). Both default 0 -> exact prior
+        # behavior; they compose additively.
+        if (self._cop_support_forward_offset != 0.0 or self._cop_support_left_offset != 0.0):
             root_xy = body_pos[:, 0, :2]
             fwd = support_xy - root_xy
             fwd = fwd / torch.linalg.vector_norm(fwd, dim=-1, keepdim=True).clamp(min=1e-6)
-            support_xy = support_xy + self._cop_support_forward_offset * fwd
+            left = torch.stack([-fwd[:, 1], fwd[:, 0]], dim=-1)  # cross(world_up, fwd), horizontal
+            support_xy = support_xy + self._cop_support_forward_offset * fwd \
+                                    + self._cop_support_left_offset * left
         offset_sq = torch.sum((cop_xy - support_xy) ** 2, dim=-1)
         cop_support_r = torch.exp(-self._reward_cop_support_scale * offset_sq)
         gate = (total_fz > self._cop_min_force).float()
@@ -1314,7 +1411,10 @@ class DeepMimicEnv(char_env.CharEnv):
         # feet-up hold via the reference toe height so it never fights the feet-down
         # entry. Returns (new_reward, toe_force_mean, gated_penalty_fraction).
         fz = ground_contact_forces[:, self._toe_force_pen_body_ids, 2].clamp(min=0.0)  # [N, T]
-        toe_force = fz.mean(dim=-1)                                                     # [N]
+        if (self._toe_force_pen_reduce == "max"):
+            toe_force = fz.max(dim=-1).values                                           # [N] worst single foot
+        else:
+            toe_force = fz.mean(dim=-1)                                                 # [N] (diluted by body count)
         pen = torch.clamp(toe_force / self._toe_force_pen_cap, min=0.0, max=1.0)
         ref_toe_h = self._ref_body_pos[:, self._toe_force_pen_body_ids, 2].mean(dim=-1)
         gate = (ref_toe_h > self._toe_force_pen_ref_h).float()
