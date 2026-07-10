@@ -1,0 +1,121 @@
+# CROW HOLD -- LEAN-2x FINETUNE experiment (user-directed, 2026-07-07).
+#
+# GOAL: kill the residual L-toe DAB (best so far crow_lt_ampft3 = 7.4% / 12.5 N)
+# by parking the CoP equilibrium FURTHER over the hands, so gravity-neutral drift
+# is away from the toes (user: "encourage the model to further lean over the
+# hands to adjust COP"). Single-shot finetune from the CLEAN pure-AMP base
+# (crow_lt_amponly) with the FULL supporting aux pack (= the ampft2 tier:
+# tracking + cop + toe_force_pen + knee_support + toe_lift), and the CoP forward
+# lean DOUBLED: cop_support_forward_offset 0.04 -> 0.08.
+#
+# DELTA vs amp_smpl_crow_hold_lowtorque_ampft2_env.yaml: ONLY
+#   cop_support_forward_offset 0.04 -> 0.08   (everything else identical)
+# Warm-start = output/yoga_nodes_v2/crow_lt_amponly/model.pt (weights only).
+# Agent = amp_smpl_hold_discfocus_agent.yaml (task 0.25 / disc 1.0, LR 1.5e-5):
+#   the proven-critic-safe way to add a task channel onto the disc-only base
+#   (doc: amponly->ampft warm-start had bounded critic). Effective aux ~0.11 tier
+#   but the forward-lean TARGET is 2x, so the CoP setpoint shifts regardless.
+#   (To make the whole pack bite at ~0.45 instead, swap in
+#    amp_smpl_transition_lowlr_agent.yaml (task 1.0) -- riskier critic jump from
+#    the disc-only base; watch Critic_Loss on the 3M smoke.)
+#
+# Launch (150M, weights-only resume):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/amp_smpl_crow_hold_lowtorque_ampft_leanx2_env.yaml \
+#     --agent_config data/agents/amp_smpl_hold_discfocus_agent.yaml \
+#     --model_file output/yoga_nodes_v2/crow_lt_amponly/model.pt \
+#     --max_samples 150000000 --rand_seed 145 --master_port 29596
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0 # seconds; several loop cycles -> sustained hold
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True         # CAMPAIGN AMENDMENT 1 (2026-07-05): anti-camp
+    pose_termination_dist: 0.6 # m (v2 value); pincha ft entrenched a survival camp without this
+    enable_phase_obs: False
+    num_disc_obs_steps: 10
+    enable_task_tracking: True     # gentle DeepMimic channel (agent scales it by 0.25)
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 9.5]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # FALL set (v2-curated; load-bearing bodies excluded)
+
+    motion_file: "data/motions/smpl/220923_Crane_Crow_Pose_or_Bakasana_hold"
+
+    auto_ground_offset: False
+    ground_offset: 0.0624   # seats the hold support at z=0 (measured; v2 value)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- FULL aux pack (ampft2 tier) with the CoP forward lean DOUBLED ---
+    reward_toe_force_pen_w: 0.45
+    toe_force_pen_cap: 30.0
+    toe_force_pen_ref_h: 0.12
+    toe_force_pen_bodies: ["L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    reward_cop_support_w: 0.5
+    reward_cop_support_scale: 15.0
+    cop_support_forward_offset: 0.08   # 2x the crow lean-over-hands equilibrium (was 0.04)
+    cop_min_force: 10.0
+    cop_bodies: ["L_Hand", "R_Hand", "L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    cop_support_bodies: ["L_Hand", "R_Hand"]
+    # positive-contact attractor (v2): seat L_Knee/R_Knee on L_Shoulder/R_Shoulder
+    reward_knee_support_w: 0.5
+    reward_knee_support_scale: 20.0
+    knee_support_bodies: ["L_Knee", "R_Knee"]
+    knee_support_target_bodies: ["L_Shoulder", "R_Shoulder"]
+
+    # everything else stays OFF (v3 finding: no inversion bonus, no energy)
+    reward_inversion_w: 0.0
+    inversion_up_threshold: -0.5
+    inversion_force_threshold: 5.0
+    inversion_bonus_bodies: ["L_Hand", "R_Hand"]
+    reward_toe_lift_w: 0.45
+    reward_toe_lift_scale: 100.0
+    toe_lift_min_h: 0.10
+    toe_lift_ref_h: 0.12
+    toe_lift_bodies: ["L_Toe", "R_Toe"]
+    reward_com_support_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

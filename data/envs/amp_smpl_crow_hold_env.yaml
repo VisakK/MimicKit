@@ -1,0 +1,120 @@
+# CROW HOLD node -- a balance/hold SPECIALIST, decoupled from the entry transition.
+#
+# Motivation (see Crow_pose.MD): the ft4 hybrid trained on init_time_range [14,18]
+# of the full clip, but measurement showed that window's reference has the LEFT toe
+# at ~0.10 m (essentially on the floor) through [14,16.8]s while the right is up --
+# so the policy was partly TRACKING a low-left-toe reference (and the AMP disc drew
+# demos from it). That asymmetric reference is a root cause of the left-toe tap,
+# distinct from the balance-recovery cause the ft4 rewards address.
+#
+# Fix = train ONLY on the bilateral feet-up hold. The reference here is a TRIMMED,
+# WRAP-LOOPING ping-pong of frames [17.5, 22.5]s (tools/trim_hold_clip.py) where
+# BOTH toes stay >0.30 m; the loop is seamless (endpoint seam 0.017). The reference
+# never advances toward the standing exit, so neither the tracking channel nor the
+# disc can teach the toe down. Long episode (12 s > 10 s loop) trains sustained
+# balance. All ft4 reward terms kept. This is a HOLD node: it will hold but NOT
+# enter crow -- deploy/eval by RSI from a crow state; entry is a separate transition.
+#
+# Train (warm-start from the solved ft4_lowlr, stable lower-LR agent):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/amp_smpl_crow_hold_env.yaml \
+#     --agent_config data/agents/amp_smpl_transition_lowlr_agent.yaml \
+#     --model_file output/model_yoga_amp_crow_hybrid_ft4_lowlr.pt \
+#     --max_samples 150000000 --rand_seed 5
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0 # seconds; > the 10 s hold loop -> sustained-balance training
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6 # m
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    num_disc_obs_steps: 10
+    enable_task_tracking: True   # hybrid: task reward = DeepMimic tracking (+aux)
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+
+    # The hold clip is the full reference now; RSI anywhere in the loop.
+    init_time_range: [0.0, 9.5]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl/220923_Crane_Crow_Pose_or_Bakasana_hold"
+
+    auto_ground_offset: False
+    ground_offset: 0.0624   # seats the hold's hands at z=0 (measured on the full clip)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- tap-killer terms (verbatim from ft4) ---
+    reward_toe_lift_w: 0.45
+    reward_toe_lift_scale: 100.0
+    toe_lift_min_h: 0.10
+    toe_lift_ref_h: 0.12
+    toe_lift_bodies: ["L_Toe", "R_Toe"]
+
+    reward_cop_support_w: 0.5
+    reward_cop_support_scale: 15.0
+    cop_min_force: 10.0
+    cop_bodies: ["L_Hand", "R_Hand", "L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    cop_support_bodies: ["L_Hand", "R_Hand"]
+    cop_support_forward_offset: 0.04
+
+    reward_knee_support_w: 0.7
+    reward_knee_support_scale: 25.0
+    knee_support_bodies: ["L_Knee", "R_Knee"]
+    knee_support_target_bodies: ["L_Shoulder", "R_Shoulder"]
+
+    reward_toe_force_pen_w: 0.5
+    toe_force_pen_cap: 30.0
+    toe_force_pen_ref_h: 0.12
+    toe_force_pen_bodies: ["L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+
+    # All other aux OFF (force_balance especially: it rewards the toe-rest).
+    reward_com_support_w: 0.0
+    com_support_bodies: ["R_Hand", "L_Hand"]
+    reward_force_balance_w: 0.0
+    force_balance_bodies: ["R_Hand", "L_Hand"]
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_inversion_w: 0.0
+    reward_energy_w: 0.05
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

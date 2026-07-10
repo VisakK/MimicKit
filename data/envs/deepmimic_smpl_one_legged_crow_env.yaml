@@ -1,0 +1,131 @@
+# ONE-LEGGED CROW (Eka Pada Bakasana) -- right leg extends out of the crow hold.
+#
+# We have NO mocap for this pose, so this is a PURE DeepMimic (no AMP discriminator)
+# run that TRACKS a SYNTHETIC reference clip authored by tools/make_one_legged_crow_clip.py:
+#   crow hold (1.0s) -> RIGHT leg extends up-and-back (1.5s) -> one-legged hold (5.0s).
+# Using AMP here would force matching the synthetic (non-mocap) STYLE; pure DeepMimic
+# just tracks its kinematics, which is what we want. The policy is WARM-STARTED from
+# the solved crow AMP policy (disc stripped -> output/model_crow_ft4_ppo_init.pt), so
+# it already balances in crow and only has to learn the extension while staying up.
+#
+# OBS config is byte-identical to the crow envs (-> 814-d policy obs) so the warm-start
+# loads cleanly. Adaptations of the crow aux reward stack for the one-legged pose:
+#   * knee_support -> LEFT knee only (the right shin leaves the right arm when extended).
+#   * cop_support  -> + cop_support_left_offset (lean the center-of-pressure LEFT, onto
+#                     the loaded left hand, to counter the cantilevered right leg).
+#   * toe_lift / toe_force_pen -> BOTH toes (left tucked-up + right extended-up stay off
+#                     the floor); the right toe rides to z~1.1 m, far clear.
+#   * joint_err_w  -> R_Hip/R_Knee/R_Ankle emphasized so the extension is actually tracked.
+#
+# Train (200M, lower-LR PPO for critic stability; see Crow_pose.MD ft4 LR catch):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/deepmimic_smpl_one_legged_crow_env.yaml \
+#     --agent_config data/agents/deepmimic_smpl_one_legged_crow_ppo_agent.yaml \
+#     --model_file output/model_crow_ft4_ppo_init.pt \
+#     --max_samples 200000000 --rand_seed 7
+env_name: "deepmimic"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands.xml"
+    camera_mode: "track"
+
+    episode_length: 8.0 # seconds; >= the 7.47s clip -> trains through the full extend+hold
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.8 # m; loosened from the crow 0.6 -> room to track the leg sweep
+                               #     and to shift the CoM to counter the extended leg
+                               #     (contact_bodies still catch real falls)
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+
+    # RSI only into the opening crow hold (frames [0,1.0]s) -> every episode begins in
+    # crow (which the warm-start can hold) and must perform the extension; the moving
+    # reference then advances crow->extended->hold. CLAMP => it holds the extended pose
+    # at the end and the episode ends at clip end.
+    init_time_range: [0.0, 1.0]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m (visualized reference char only)
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl/one_legged_crow_synth"
+
+    auto_ground_offset: False
+    ground_offset: 0.0618   # seats the hands at z~0 (measured on this clip: min geom z -0.0618 @ L_Hand)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    # per-joint tracking weights (23 joints): L leg | R leg | spine | L arm | R arm.
+    # R_Hip/R_Knee/R_Ankle bumped (2.0/2.5/0.6 -> 3.0/3.5/1.0) so the extension is tracked;
+    # left leg kept (it must hold the tuck).
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 3.0, 3.5, 1.0, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5      # direct L_Toe/R_Toe/hand up-position signal (R_Toe rides out+up)
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- keep BOTH toes off the floor (left tucked-up, right extended-up) ---
+    reward_toe_lift_w: 0.45
+    reward_toe_lift_scale: 100.0
+    toe_lift_min_h: 0.10
+    toe_lift_ref_h: 0.12
+    toe_lift_bodies: ["L_Toe", "R_Toe"]
+
+    reward_toe_force_pen_w: 0.5
+    toe_force_pen_cap: 30.0
+    toe_force_pen_ref_h: 0.12
+    toe_force_pen_bodies: ["L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+
+    # --- CoP on the hands, biased FORWARD (no rear tap) and LEFT (counter the right leg) ---
+    reward_cop_support_w: 0.5
+    reward_cop_support_scale: 15.0
+    cop_min_force: 10.0
+    cop_bodies: ["L_Hand", "R_Hand", "L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    cop_support_bodies: ["L_Hand", "R_Hand"]
+    cop_support_forward_offset: 0.04
+    cop_support_left_offset: 0.04   # NEW: lean the center-of-pressure to the LEFT hand
+
+    # --- LEFT-knee-on-left-arm shelf only (the right knee is extended away) ---
+    reward_knee_support_w: 0.7
+    reward_knee_support_scale: 25.0
+    knee_support_bodies: ["L_Knee"]
+    knee_support_target_bodies: ["L_Shoulder"]
+
+    # All other aux OFF (force_balance especially: it rewards a toe-rest).
+    reward_com_support_w: 0.0
+    com_support_bodies: ["R_Hand", "L_Hand"]
+    reward_force_balance_w: 0.0
+    force_balance_bodies: ["R_Hand", "L_Hand"]
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_inversion_w: 0.0
+    reward_energy_w: 0.05
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

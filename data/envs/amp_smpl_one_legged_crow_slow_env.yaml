@@ -1,0 +1,129 @@
+# ONE-LEGGED CROW -- AMP + DeepMimic HYBRID on a SLOW clip (style-preserving approach).
+#
+# The pure-DeepMimic finetunes (ft/ft2) achieved the shin-load and a straight leg but
+# LOST the crow STYLE: arms flared, head dropped, and the fully-extended leg forced a
+# toe plant. Fix = bring back the AMP discriminator (as in the crow HOLD), whose demos
+# are now drawn from the SLOW natural-base clip (data/motions/smpl/one_legged_crow_slow:
+# real crow-hold body motion + a 5 s right-leg extension). The disc enforces the tucked-
+# arm / lifted-head crow STYLE while DeepMimic + the contact rewards drive the slow
+# extension. Warm-started from the clean crow HOLD AMP model (output/model_yoga_amp_crow_hold.pt
+# -- AMP->AMP, obs 814 / disc 2370, NO surgery). Goal: keep crow style as long as
+# possible while the leg eases out.
+#
+# Hybrid reward = DeepMimic tracking + AMP disc (style) + the one-legged aux stack:
+#   toe_lift (both), toe_force_pen (max-metric), cop_support (fwd+left), knee_support
+#   (LEFT only), knee_force (LEFT shin BEARS load), leg_straight (RIGHT knee). Moderate
+#   aux weights -- the disc carries the style so the aux need not over-drive (which is
+#   what broke style in ft2).
+#
+# Train (200M, lower-LR hybrid agent -- the crow-hold recipe):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/amp_smpl_one_legged_crow_slow_env.yaml \
+#     --agent_config data/agents/amp_smpl_transition_lowlr_agent.yaml \
+#     --model_file output/model_yoga_amp_crow_hold.pt --max_samples 200000000 --rand_seed 11
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands.xml"
+    camera_mode: "track"
+
+    episode_length: 11.0 # seconds; >= the 9.97s clip -> trains the full slow extend + hold
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.8
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    num_disc_obs_steps: 10
+    enable_task_tracking: True   # hybrid: task reward = DeepMimic tracking (+aux), plus AMP disc
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+
+    # RSI into the opening 2 s crow hold -> every episode starts in crow style and the
+    # slow reference then eases the leg out; the disc keeps the body in crow style.
+    init_time_range: [0.0, 1.5]
+
+    ref_char_offset: [2.0, 0.0, 0.0]
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl/one_legged_crow_slow"
+
+    auto_ground_offset: False
+    ground_offset: 0.0624   # seats the hands at z~0 (measured on this clip: min geom z -0.0624)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0
+    obs_contact_margin_cap: 1.0
+
+    # moderate right-leg emphasis (NOT the aggressive ft2 4.0/5.0 that broke style)
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 3.0, 3.5, 1.0, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    reward_toe_lift_w: 0.45
+    reward_toe_lift_scale: 100.0
+    toe_lift_min_h: 0.10
+    toe_lift_ref_h: 0.12
+    toe_lift_bodies: ["L_Toe", "R_Toe"]
+
+    reward_toe_force_pen_w: 0.5
+    toe_force_pen_cap: 100.0
+    toe_force_pen_ref_h: 0.12
+    toe_force_pen_bodies: ["L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    toe_force_pen_reduce: "max"
+
+    reward_cop_support_w: 0.5
+    reward_cop_support_scale: 15.0
+    cop_min_force: 10.0
+    cop_bodies: ["L_Hand", "R_Hand", "L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    cop_support_bodies: ["L_Hand", "R_Hand"]
+    cop_support_forward_offset: 0.06
+    cop_support_left_offset: 0.06
+
+    reward_knee_support_w: 0.7
+    reward_knee_support_scale: 25.0
+    knee_support_bodies: ["L_Knee"]
+    knee_support_target_bodies: ["L_Shoulder"]
+
+    reward_knee_force_w: 0.5
+    knee_force_target: 120.0
+    knee_force_bodies: ["L_Knee"]
+
+    reward_leg_straight_w: 0.4
+    leg_straight_bodies: ["R_Hip", "R_Knee", "R_Ankle"]
+
+    reward_com_support_w: 0.0
+    com_support_bodies: ["R_Hand", "L_Hand"]
+    reward_force_balance_w: 0.0
+    force_balance_bodies: ["R_Hand", "L_Hand"]
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_inversion_w: 0.0
+    reward_energy_w: 0.05
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

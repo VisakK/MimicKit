@@ -1,0 +1,118 @@
+# DOWNDOG HOLD -- ft2 ESCALATION: load the airborne LEFT HAND (v3.1, 2026-07-06).
+#
+# LIKELY UNNECESSARY AFTER THE -c RE-TRIM (2026-07-06, same day): the root
+# cause was the REFERENCE -- variant -b lifts the left hand for 22% of the
+# hold loop, so the disc licensed the three-point stance. downdog_hold is now
+# re-trimmed from variant -c (both hands planted 100% of frames); expect the
+# clean-ref retrain to plant both palms without this term (square-hands
+# precedent). Keep as the fallback rung only.
+#
+# WHY: the pure-AMP base converged to a THREE-POINT downdog (L_Hand 0.0 N /
+# 0.0 contact; R_Hand 109 N) and the gentle ampft did NOT pull the hand down
+# (L_Hand 0.4 N, 1.7% contact -- verifier PASS only via the majority-support
+# rule). Same thin-feature failure as the wrist saga: a 2-joint deviation is
+# too small for the saturating tracking kernel. Downdog is graph HUB #1 --
+# a downdog->handstand kick-up needs both palms planted, so this is a
+# flow-critical fix, not cosmetics.
+# FIX (tree-ft2 mechanism, proven 2026-07-06): cop_support 0.5 / scale 15
+# over the FOUR-POINT base (hands+toes). With the left hand airborne the CoP
+# sits right of the support centroid -> direct gradient to load it.
+# Deltas from amp_smpl_downdog_hold_lowtorque_ampft_env.yaml (else identical):
+#   reward_cop_support_w 0.0 -> 0.5, scale 10 -> 15
+#   cop_support_bodies [L_Hand,R_Hand] -> [L_Hand,R_Hand,L_Toe,R_Toe]
+#
+# Run (weights-only resume from the ampft checkpoint; fresh 150M):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/amp_smpl_downdog_hold_lowtorque_ampft2_env.yaml \
+#     --agent_config data/agents/amp_smpl_hold_discfocus_agent.yaml \
+#     --model_file output/yoga_nodes_v2/downdog_lt_ampft/model.pt \
+#     --max_samples 150000000 --rand_seed 130 --master_port 29585
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0 # seconds; several loop cycles -> sustained hold
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True         # CAMPAIGN AMENDMENT 1 (2026-07-05): anti-camp
+    pose_termination_dist: 0.6 # m (v2 value); pincha ft entrenched a survival camp without this
+    enable_phase_obs: False
+    num_disc_obs_steps: 10
+    enable_task_tracking: True     # gentle DeepMimic channel (agent scales it by 0.25)
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 14.93]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # FALL set (v2-curated; load-bearing bodies excluded)
+
+    motion_file: "data/motions/smpl_holds/downdog_hold"
+
+    auto_ground_offset: False
+    ground_offset: 0.0518   # re-measured on the -a re-trim (2026-07-07)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- ft2 escalation: CoP over the 4-point base (see header) ---
+    reward_toe_force_pen_w: 0.0
+    toe_force_pen_cap: 30.0
+    toe_force_pen_ref_h: 0.12
+    toe_force_pen_bodies: ["L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    reward_cop_support_w: 0.5      # ft2: was 0.0 -- load the airborne left hand
+    reward_cop_support_scale: 15.0
+    cop_min_force: 10.0
+    cop_bodies: ["L_Ankle", "L_Hand", "L_Toe", "R_Ankle", "R_Hand", "R_Toe"]
+    cop_support_bodies: ["L_Hand", "R_Hand", "L_Toe", "R_Toe"]   # ft2: the 4-point base
+    # knee_support OFF: knee-x-knee parallel-leg adjacency (-0.168)
+    reward_knee_support_w: 0.0
+    reward_knee_support_scale: 20.0
+    knee_support_bodies: []
+    knee_support_target_bodies: []
+
+    # everything else stays OFF (v3 finding: no inversion bonus, no energy)
+    reward_inversion_w: 0.0
+    inversion_up_threshold: -0.5
+    inversion_force_threshold: 5.0
+    inversion_bonus_bodies: ["L_Hand", "R_Hand"]
+    reward_toe_lift_w: 0.0
+    reward_com_support_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

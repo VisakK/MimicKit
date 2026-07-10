@@ -1,0 +1,104 @@
+# CHAIR HOLD -- CoP ESCALATION (2026-07-09). Fixes the baseline ft's one-legged
+# collapse (L_Ankle 229N@100% / R_Ankle 4N@16%; strip = narrow stance + lateral tilt).
+# Adds cop_support over BOTH ankles (no offset) -> drives the center-of-pressure to
+# the two-foot centroid, penalizing weight collapsing onto one leg. Warm-start from
+# chair_lt_ampft (already stable, 14mm wobble -- just needs load redistribution).
+# DELTA vs amp_smpl_chair_hold_lowtorque_ampft_env.yaml: cop_support_w 0->0.5,
+# scale 10->15, cop_support_bodies hands->ankles, cop_bodies -> feet only, +offset 0.
+#
+# Launch (150M, weights-only resume from the stable ampft):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/amp_smpl_chair_hold_lowtorque_cop_env.yaml \
+#     --agent_config data/agents/amp_smpl_hold_discfocus_agent.yaml \
+#     --model_file output/yoga_nodes_v2/chair_lt_ampft/model.pt \
+#     --max_samples 150000000 --rand_seed 108 --master_port 29566
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6
+    enable_phase_obs: False
+    num_disc_obs_steps: 10
+    enable_task_tracking: True
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 14.93]
+
+    ref_char_offset: [2.0, 0.0, 0.0]
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl_holds/chair_hold"
+
+    auto_ground_offset: False
+    ground_offset: 0.0367
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0
+    obs_contact_margin_cap: 1.0
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- NEW: CoP over BOTH feet (symmetric two-foot loading; the one-leg fix) ---
+    reward_cop_support_w: 0.5
+    reward_cop_support_scale: 15.0
+    cop_support_bodies: ["L_Ankle", "R_Ankle"]
+    cop_bodies: ["L_Ankle", "R_Ankle", "L_Toe", "R_Toe"]
+    cop_support_forward_offset: 0.0   # symmetric — no lean
+    cop_min_force: 10.0
+
+    # gentle aux (unchanged from baseline ft; all default-off here)
+    reward_toe_force_pen_w: 0.0
+    toe_force_pen_cap: 30.0
+    toe_force_pen_ref_h: 0.12
+    toe_force_pen_bodies: ["L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    reward_knee_support_w: 0.0
+    reward_knee_support_scale: 20.0
+    knee_support_bodies: []
+    knee_support_target_bodies: []
+
+    reward_inversion_w: 0.0
+    inversion_up_threshold: -0.5
+    inversion_force_threshold: 5.0
+    inversion_bonus_bodies: ["L_Hand", "R_Hand"]
+    reward_toe_lift_w: 0.0
+    reward_com_support_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

@@ -18,7 +18,9 @@ contact SET, support geometry and penetration are deterministic):
     matters)
   * body-on-body proximity -> non-adjacent collision geoms resting on each other
     (defines eight-angle / Koundinyasana / firefly arm-balances the ground
-    sensor is blind to)
+    sensor is blind to). body_on_body is leg x arm (unchanged, consumed by
+    index.json / anchor_probe); body_on_body_ext adds cross-side leg x leg and
+    arm x arm pairs (tree foot-on-thigh press, eagle leg + arm wraps)
   * hold segments        -> every stable held-pose window (multi-attempt clips
     have several) with frame ranges + per-window contact signature
   * entry / exit / inter-hold segments -> frame ranges. Each single-pose clip is
@@ -65,6 +67,15 @@ CONTACT_EPS = 0.05       # m: lowest geom within this of the floor -> in contact
 HOLD_SPEED = 0.20        # m/s: mean body speed below this -> quasi-static
 MIN_HOLD_S = 0.8         # s: shortest window we call a "hold"
 ONBODY_EPS = 0.03        # m: non-adjacent geoms closer than this -> on-body support
+ONBODY_EXT_EPS = 0.05    # m: looser eps for body_on_body_ext (cross-side leg x leg /
+                         # arm x arm). Measured: every true press/wrap pair on
+                         # tree + eagle sits at <= +0.039 (eagle wrist x wrist
+                         # +0.019, ankle wrap +0.039) while the first NOT-touching
+                         # pairs on unrelated clips appear at >= +0.054 (boat
+                         # ankle x toe, crow hip x ankle). 0.05 clears the real
+                         # contacts by the corpus's ~2-3cm mocap L/R stagger
+                         # without admitting that noise band; 0.03 would clip the
+                         # eagle wraps to a 1cm margin.
 ENDPOINT_WIN_S = 0.5     # s: averaging window at entry-start / exit-end
 CONTACT_FRAC = 0.6       # fraction of a window a body must contact to be "load-bearing"
 
@@ -291,22 +302,37 @@ def window_fingerprint(i0, i1, ctx):
     mid = (i0 + i1) // 2
     ctr, rad = body_spheres(geoms, body_pos[mid], body_rot[mid])
     onbody = []
+    onbody_ext = []
     ground = set(cids)
     B = len(bn)
     is_leg = lambda n: any(k in n for k in ("Hip", "Knee", "Ankle", "Toe"))
     is_arm = lambda n: any(k in n for k in ("Shoulder", "Elbow", "Wrist", "Hand"))
+    # ext pair classes = the positive contacts a finetune stage should REWARD
+    # (contacts that SHOULD exist), which the leg x arm class misses:
+    #   LEG x LEG, cross-side only -- tree's lifted foot pressed into the standing
+    #   inner thigh, eagle's leg wrap. Same-side leg pairs are chain-adjacent and
+    #   trivially near, and Hip x Hip is pelvis anatomy, not contact -> excluded.
+    #   ARM x ARM (Elbow/Wrist/Hand, cross-side) -- the eagle arm wrap.
+    is_wrap_arm = lambda n: any(k in n for k in ("Elbow", "Wrist", "Hand"))
+    cross_side = lambda x, y: x[:2] != y[:2]            # L_ vs R_ prefixes
     for a in range(B):
         for b in range(a + 1, B):
             if rad[a] == float("-inf") or rad[b] == float("-inf"):
                 continue
             na, nb = bn[a], bn[b]
-            if not ((is_leg(na) and is_arm(nb)) or (is_arm(na) and is_leg(nb))):
+            legarm = (is_leg(na) and is_arm(nb)) or (is_arm(na) and is_leg(nb))
+            legleg = (is_leg(na) and is_leg(nb) and cross_side(na, nb)
+                      and not ("Hip" in na and "Hip" in nb))
+            armarm = is_wrap_arm(na) and is_wrap_arm(nb) and cross_side(na, nb)
+            if not (legarm or legleg or armarm):
                 continue
             if a in ground and b in ground:             # both on floor -> not on-body
                 continue
             d = (ctr[a] - ctr[b]).norm().item() - rad[a].item() - rad[b].item()
-            if d < ONBODY_EPS:
+            if legarm and d < ONBODY_EPS:
                 onbody.append([na, nb, round(d, 3)])
+            elif (legleg or armarm) and d < ONBODY_EXT_EPS:
+                onbody_ext.append([na, nb, round(d, 3)])
 
     # heading-local pose at window mid for symmetry
     hinv = torch_util.calc_heading_quat_inv(ctx["root_rot"][mid:mid + 1])
@@ -337,6 +363,7 @@ def window_fingerprint(i0, i1, ctx):
         "support_aspect": round(aspect, 2),
         "com_margin_m": round(margin, 3),
         "body_on_body": onbody,
+        "body_on_body_ext": onbody_ext,
         "lr_symmetry": round(sym, 3),
         "is_inverted": bool(up_z[i0:i1 + 1].mean() < -0.3),
     }

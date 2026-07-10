@@ -1,0 +1,119 @@
+# HANDSTAND HOLD -- GENTLE FINETUNE of the pure-AMP baseline (2026-07-04).
+#
+# Stage 2 of the AMP-first ladder (user direction after signing off the
+# handstand_lt_amponly rendered motion): the pure-AMP 400M policy got realism
+# RIGHT (square hands +0.9 cm = ref, symmetric wrists -22/-20 deg, base 42 cm)
+# but is 3x wobblier than the hybrid (18.5 vs 5.8 mm), loads palms unevenly
+# (163/209 N), and sits slightly shy of full inversion (up_z -0.967 vs -0.988).
+# This env re-adds a SMALL task channel to polish those, without handing the
+# reward mix back enough weight to re-buy the staggered/widened base the full
+# hybrid converged to (task 1.0 + aux 0.5/15 -> -16.5 cm stagger, 52-56 cm base).
+#
+# Differences from amp_smpl_handstand_hold_lowtorque_amponly_env.yaml (the base
+# this run warm-starts from -- everything else identical, incl. pose_termination
+# OFF so episode/termination dynamics don't change under the policy's feet):
+#   enable_task_tracking: False -> True    (DeepMimic tracking channel back on)
+#   tracking weights 0 -> recipe proportions (pose 0.5 / vel 0.1 / root 0.5+0.2 / key 0.5)
+#   cop_support 0 -> 0.25, scale 10, forward_offset +0.04  (crow ft-GENTLE tier,
+#       NOT the 0.5/15 the staggered hybrid ran; the +4 cm lean-over-hands is
+#       the crow equilibrium fix)
+#   toe_force_pen 0 -> 0.25 (cap 30)       (contact term, crow ft-gentle tier)
+# Aux NOT re-enabled: inversion bonus, energy (not requested; keep the delta
+# minimal and attributable).
+#
+# Agent: data/agents/amp_smpl_hold_discfocus_agent.yaml (task 0.25 / disc 1.0,
+# LR 1.5e-5 -- critic-safe with toe_force_pen, ft4 lesson; same net shapes as
+# amp_smpl_agent.yaml so the amponly checkpoint loads). Effective end-to-end
+# weights are therefore SMALL: e.g. cop 0.25 x task 0.25 = 0.0625. Escalate the
+# crow-ladder way (env weights first, then agent task weight) only if needed.
+#
+# Finetune (weights-only resume; fresh 150M budget):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/amp_smpl_handstand_hold_lowtorque_ampft_env.yaml \
+#     --agent_config data/agents/amp_smpl_hold_discfocus_agent.yaml \
+#     --model_file output/yoga_nodes_v2/handstand_lt_amponly/model.pt \
+#     --max_samples 150000000 --rand_seed 61
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0 # seconds; several loop cycles -> sustained hold
+    global_obs: True
+    root_height_obs: True
+    pose_termination: False        # unchanged from the amponly base (fall = contact_bodies)
+    enable_phase_obs: False
+    num_disc_obs_steps: 10
+    enable_task_tracking: True     # gentle DeepMimic channel (agent scales it by 0.25)
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 2.39]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # FALL set (load-bearing bodies excluded)
+
+    motion_file: "data/motions/smpl_holds/handstand_hold"
+
+    auto_ground_offset: False
+    ground_offset: 0.0349   # seats the hold support at z=0 (measured)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- GENTLE aux pack: crow ft-tier weights, lean-over-hands included ---
+    reward_toe_force_pen_w: 0.25
+    toe_force_pen_cap: 30.0
+    toe_force_pen_ref_h: 0.12
+    toe_force_pen_bodies: ["L_Toe", "R_Toe", "L_Ankle", "R_Ankle"]
+    reward_cop_support_w: 0.25
+    reward_cop_support_scale: 10.0
+    cop_support_forward_offset: 0.04   # the crow lean-over-hands equilibrium
+    cop_min_force: 10.0
+    cop_bodies: ["L_Ankle", "L_Hand", "L_Toe", "R_Ankle", "R_Hand", "R_Toe"]
+    cop_support_bodies: ["L_Hand", "R_Hand"]
+
+    # everything else stays OFF (minimal, attributable delta from the AMP base)
+    reward_inversion_w: 0.0
+    inversion_up_threshold: -0.5
+    inversion_force_threshold: 5.0
+    inversion_bonus_bodies: ["L_Hand", "R_Hand"]
+    reward_toe_lift_w: 0.0
+    reward_com_support_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+    reward_energy_scale: 0.001
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

@@ -116,6 +116,16 @@ class DeepMimicEnv(char_env.CharEnv):
         self._reward_com_support_w = env_config.get("reward_com_support_w", 0.0)
         self._reward_com_support_scale = env_config.get("reward_com_support_scale", 10.0)
         self._com_support_bodies = env_config.get("com_support_bodies", [])
+        # Optionally bias the COM target off the support centroid: FORWARD (along
+        # the horizontal root->support direction) and/or to the character's LEFT,
+        # mirroring cop_support_{forward,left}_offset. Forward seats the COM past
+        # the hands (removes a tipping-backward moment with margin); left biases a
+        # one-legged hold. Both default 0 -> exact prior isotropic behavior. NOTE:
+        # this is a cm-scale term, so reward_com_support_scale must be raised well
+        # above its default 10 (which is inert at cm offsets) -- ~400 for the 3-5cm
+        # regime -- to produce a usable gradient.
+        self._com_support_forward_offset = env_config.get("com_support_forward_offset", 0.0)
+        self._com_support_left_offset = env_config.get("com_support_left_offset", 0.0)
 
         # Contact-force balance reward (set weight to 0 to disable). Adds
         # reward_force_balance_w * exp(-reward_force_balance_scale * c), where
@@ -291,6 +301,30 @@ class DeepMimicEnv(char_env.CharEnv):
         # the WORST single foot, so one planted toe is caught at its true force.
         self._toe_force_pen_reduce = env_config.get("toe_force_pen_reduce", "mean")
 
+        # Flush ground-support reward (config-gated, default OFF). Rewards each
+        # listed ground-support body for planting its contact FACE flush with the
+        # ground -- i.e. matching the REFERENCE contact attitude (flat for a palm
+        # or sole, on-edge for a side-plank blade), WEIGHTED by that body's share
+        # of the total vertical ground reaction. The load weight is what makes it
+        # un-farmable: a cosmetically-flat but UNLOADED (hovering) body carries a
+        # near-zero force share and contributes ~0; and weight leaking onto an
+        # off-target contact (e.g. a balance toe-tap) dilutes the flat supports'
+        # share, so the reward drops. Per-body contribution:
+        #   (Fz_b / total_Fz) * exp(-scale * (1 - align_b)),
+        #   align_b = -(R_cur_b @ a_b).z  in [-1, 1],
+        #   a_b = R_ref_b^-1 @ (-z_world)  (body-local "down when planted as the
+        #         reference is"; bakes in the collision-geom frame, no hard-coded
+        #         face axis). align=1 <=> current attitude matches the reference's
+        #   contact attitude; rotation (yaw) about the vertical is free. This is
+        # the fix for the crow balancing on the EDGE of the palms. Gated off when
+        # the total support force is below flush_support_min_force (airborne ->
+        # attitude undefined). Tracked as flush_align (load-weighted mean attitude
+        # agreement) and flush_support_r.
+        self._reward_flush_support_w = env_config.get("reward_flush_support_w", 0.0)
+        self._reward_flush_support_scale = env_config.get("reward_flush_support_scale", 8.0)
+        self._flush_support_bodies = env_config.get("flush_support_bodies", [])
+        self._flush_support_min_force = env_config.get("flush_support_min_force", 10.0)
+
         self._visualize_ref_char = env_config.get("visualize_ref_char", True)
 
         # Goal-pose observation (#2, goal-conditioning) + goal-pose distance gate
@@ -437,6 +471,8 @@ class DeepMimicEnv(char_env.CharEnv):
         self._cop_support_body_ids = self._build_body_ids_tensor(cop_support_bodies)
         toe_force_pen_bodies = self._toe_force_pen_bodies if self._reward_toe_force_pen_w > 0.0 else []
         self._toe_force_pen_body_ids = self._build_body_ids_tensor(toe_force_pen_bodies)
+        flush_support_bodies = self._flush_support_bodies if self._reward_flush_support_w > 0.0 else []
+        self._flush_support_body_ids = self._build_body_ids_tensor(flush_support_bodies)
 
         # Cache m*g for the cost-of-transport reward. Assumes all envs share
         # the same character (true today since char_file is global), so a
@@ -1044,7 +1080,8 @@ class DeepMimicEnv(char_env.CharEnv):
                    or (self._reward_inversion_w > 0.0 and self._inversion_body_ids.shape[0] > 0) \
                    or (self._reward_cop_support_w > 0.0 and self._cop_body_ids.shape[0] > 0) \
                    or (self._reward_toe_force_pen_w > 0.0 and self._toe_force_pen_body_ids.shape[0] > 0) \
-                   or (self._reward_knee_force_w > 0.0 and self._knee_force_body_ids.shape[0] > 0)
+                   or (self._reward_knee_force_w > 0.0 and self._knee_force_body_ids.shape[0] > 0) \
+                   or (self._reward_flush_support_w > 0.0 and self._flush_support_body_ids.shape[0] > 0)
         if (need_gcf):
             ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
 
@@ -1119,6 +1156,12 @@ class DeepMimicEnv(char_env.CharEnv):
                 self._reward_buf, body_pos, ground_contact_forces)
             reward_components["toe_force"] = toe_force
             reward_components["toe_force_pen_r"] = toe_force_pen_r
+
+        if (self._reward_flush_support_w > 0.0 and self._flush_support_body_ids.shape[0] > 0):
+            self._reward_buf[:], flush_align, flush_support_r = self._apply_flush_support_reward(
+                self._reward_buf, char_id, ground_contact_forces)
+            reward_components["flush_align"] = flush_align
+            reward_components["flush_support_r"] = flush_support_r
 
         if (self._reward_energy_w > 0.0):
             self._reward_buf[:], energy, energy_r = self._apply_energy_reward(
@@ -1263,9 +1306,19 @@ class DeepMimicEnv(char_env.CharEnv):
         # offset_sq, com_support_r) for the iter-average reward-term tracker.
         com = torch.einsum("nbk,b->nk", body_pos, self._com_body_weights)
         support_xy = body_pos[:, self._com_support_body_ids, :2].mean(dim=1)
+        # Optional headward/left bias of the target (identical to cop_support).
+        if (self._com_support_forward_offset != 0.0 or self._com_support_left_offset != 0.0):
+            root_xy = body_pos[:, 0, :2]
+            fwd = support_xy - root_xy
+            fwd = fwd / torch.linalg.vector_norm(fwd, dim=-1, keepdim=True).clamp(min=1e-6)
+            left = torch.stack([-fwd[:, 1], fwd[:, 0]], dim=-1)  # cross(world_up, fwd)
+            support_xy = support_xy + self._com_support_forward_offset * fwd \
+                                    + self._com_support_left_offset * left
         offset_sq = torch.sum((com[..., :2] - support_xy) ** 2, dim=-1)
         com_support_r = torch.exp(-self._reward_com_support_scale * offset_sq)
-        return reward_buf + self._reward_com_support_w * com_support_r, offset_sq, com_support_r
+        # Track the offset in METERS (sqrt) for a readable 3_RewardTerms trace.
+        com_offset = torch.sqrt(offset_sq.clamp(min=0.0))
+        return reward_buf + self._reward_com_support_w * com_support_r, com_offset, com_support_r
 
     def _apply_force_balance_reward(self, reward_buf, ground_contact_forces):
         # Penalize the sum of squared contact-force magnitudes over the listed
@@ -1420,6 +1473,41 @@ class DeepMimicEnv(char_env.CharEnv):
         gate = (ref_toe_h > self._toe_force_pen_ref_h).float()
         gated = pen * gate
         return reward_buf - self._reward_toe_force_pen_w * gated, toe_force, gated
+
+    def _apply_flush_support_reward(self, reward_buf, char_id, ground_contact_forces):
+        # Reward FLUSH ground contact: each flush_support body should present its
+        # contact face at the same attitude the REFERENCE does (flat palm/sole, or
+        # on-edge blade), weighted by that body's measured share of the total
+        # vertical ground reaction. a_b = R_ref_b^-1 @ (-z_world) is the body-local
+        # axis that points straight down when the body is planted as the reference
+        # is (so the geom's own frame is baked in -- no hard-coded face axis).
+        # align_b = -(R_cur_b @ a_b).z is 1 when the current attitude matches the
+        # reference's (yaw about the vertical is free), and falls off as the face
+        # tilts toward an edge. Weighting by Fz_b/total_Fz turns this into a
+        # CONTACT-QUALITY signal rather than a pose bonus: an unloaded flat hand
+        # earns ~0 (its force share ~0), a LOADED edge-tilted hand is penalized in
+        # proportion to the weight it bears, and weight leaking to an off-target
+        # tap dilutes the flat supports' share. Gated off when the total support
+        # force is below flush_support_min_force. Returns (new_reward, flush_align,
+        # flush_support_r) for the iter-average reward-term tracker.
+        body_rot = self._engine.get_body_rot(char_id)
+        cur = body_rot[:, self._flush_support_body_ids, :]                # [N, K, 4] xyzw
+        ref = self._ref_body_rot[:, self._flush_support_body_ids, :]      # [N, K, 4]
+        down = torch.zeros(cur.shape[:-1] + (3,), device=cur.device, dtype=cur.dtype)
+        down[..., 2] = -1.0                                               # world -z
+        a = torch_util.quat_rotate(torch_util.quat_conjugate(ref), down)  # body-local down-when-ref [N,K,3]
+        face_dir = torch_util.quat_rotate(cur, a)                         # world contact-face normal [N,K,3]
+        align = -face_dir[..., 2]                                         # -(face . z) in [-1, 1]
+        flat = torch.exp(-self._reward_flush_support_scale * (1.0 - align).clamp(min=0.0))  # [N, K]
+
+        fz = ground_contact_forces[:, self._flush_support_body_ids, 2].clamp(min=0.0)       # [N, K]
+        total_fz = ground_contact_forces[..., 2].clamp(min=0.0).sum(dim=-1)                 # [N] over ALL bodies
+        w = fz / total_fz.clamp(min=1e-6).unsqueeze(-1)                   # [N, K] measured load share
+        gate = (total_fz > self._flush_support_min_force).float()        # [N]
+
+        flush_support_r = (w * flat).sum(dim=-1) * gate                  # [N] in [0, 1]
+        flush_align = (w * align).sum(dim=-1) * gate                     # [N] load-weighted mean align (diag)
+        return reward_buf + self._reward_flush_support_w * flush_support_r, flush_align, flush_support_r
 
     def _apply_orient_reward(self, reward_buf, char_id):
         # Task-space world-orientation tracking of the listed key bodies (e.g.
