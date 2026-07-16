@@ -1,0 +1,91 @@
+# EDGE tadasana -> warrior2 ENTRY — PURE DEEPMIMIC (2026-07-13, user-directed).
+# The ENTRY (reverse maneuver of the BANKED warrior2->tadasana exit), trained the
+# same way that banked the exit: pure per-body DeepMimic tracking on a CLEAN
+# reference, no disc, no aux (THE LESSON — demo quality beats reward engineering).
+# Uses the REAL entry frames (NEVER time-reverse an exit — physics doesn't
+# reverse, framework §6.6).
+#
+# Reference = tadasana_to_warrior2 (220926_Warrior_II_-a frames 60-265, 6.83s):
+# 1.0s tadasana lead-in + step-out transition [1.0-3.83s in clip] + 3.0s settled
+# Warrior II hold. Baked ground offset +0.0338 m (worst pen 0.4cm; preflight PASS).
+# Wide-base, both feet planted throughout — the forgiving direction.
+#
+# Launch (500M from scratch; agent deepmimic_smpl_ppo_agent.yaml, LR 3e-5):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/edge_tadasana_to_warrior2_deepmimic_env.yaml \
+#     --agent_config data/agents/deepmimic_smpl_ppo_agent.yaml \
+#     --max_samples 500000000 --rand_seed 211 --master_port 29750
+env_name: "deepmimic"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 3.8]   # lead-in + transition ONLY (no tail farm)
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # FALL set (all-standing edge)
+
+    motion_file: "data/motions/smpl_edges/tadasana_to_warrior2"
+
+    auto_ground_offset: False
+    ground_offset: 0.0   # baked at trim time (+0.0338 m already in the clip)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- pure tracking: EVERYTHING else OFF ---
+    reward_contact_schedule_w: 0.0
+    reward_com_tracking_w: 0.0
+    reward_contact_motion_w: 0.0
+    reward_com_support_w: 0.0
+    reward_flush_support_w: 0.0
+    reward_toe_force_pen_w: 0.0
+    reward_cop_support_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_toe_lift_w: 0.0
+    reward_inversion_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

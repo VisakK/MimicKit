@@ -1,0 +1,101 @@
+# EDGE: crow -> tadasana (EXIT) — segment-mimic pilot (Yoga_edge_framework_v3.md §7.2)
+#
+# First edge of the new framework: hybrid AMP tracking of the REAL exit demo
+# segment (data/motions/smpl_edges/crow_to_tadasana = Bakasana_-b frames
+# 834-991: 1.0s crow-hold lead-in + the 1.7s exit transition + 2.5s standing
+# tail; per-segment ground offset BAKED at trim time -> ground_offset 0 here;
+# loop CLAMP). Real mocap velocities feed the reward_vel/root_vel channels —
+# nothing is synthetic (no slerp, no classifier, no goal bonus; stage-1 = zero
+# aux terms per the framework's L5 discipline).
+#
+# Cloned from output/yoga_nodes_v2/crow_lt_comfwd/env_config.yaml with ONLY:
+# motion_file/ground_offset/init_time_range/aux-zeroing changed — obs shape is
+# IDENTICAL to the crow node env, which makes the warm start from
+# crow_lt_comfwd/model.pt legal (exit edges start where the source node lives).
+#
+# RSI window [0.0, 2.73] = lead-in start .. transition end (annotation frames;
+# the B-hold tail is EXCLUDED from RSI — tail resets are a reward farm).
+# CLAMP clip => motion_len_term auto-True => episodes end SUCC at reference end
+# (>= 2.5s of post-arrival standing hold from any RSI start; the dwell gate
+# needs ~1s). If that dwell proves short, the planned refinement is a
+# config-gated motion_len_term override, not a bigger clip.
+#
+# Launch (150M, weights-only warm start; ONE AMP job on the A5000):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/edge_crow_to_tadasana_env.yaml \
+#     --agent_config data/agents/amp_smpl_transition_lowlr_agent.yaml \
+#     --model_file output/yoga_nodes_v2/crow_lt_comfwd/model.pt \
+#     --max_samples 150000000 --rand_seed 155 --master_port 29620
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0 # s; unused in practice — SUCC fires at reference end
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6 # m — divergence/failure radius (framework §3.1)
+    enable_phase_obs: False
+    num_disc_obs_steps: 10
+    enable_task_tracking: True
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 2.73]   # lead-in + transition ONLY (no tail RSI)
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"]
+
+    motion_file: "data/motions/smpl_edges/crow_to_tadasana"
+
+    auto_ground_offset: False
+    ground_offset: 0.0   # baked into the edge clip at trim time (make_edge_clips)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- stage-1 edge discipline: ALL aux terms OFF (framework §2.1) ---
+    reward_toe_force_pen_w: 0.0
+    reward_cop_support_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_toe_lift_w: 0.0
+    reward_flush_support_w: 0.0
+    reward_com_support_w: 0.0
+    reward_inversion_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

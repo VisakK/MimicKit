@@ -1,0 +1,137 @@
+# EDGE: malasana -> tadasana (EXIT) — segment-mimic (Yoga_edge_framework_v3.md §2)
+#
+# Simplification pilot after the tadasana->crow hard-class verdict: the simplest
+# possible edge (support set = feet THROUGHOUT — no contact change, no ballistic
+# phase). Reference = data/motions/smpl_edges/malasana_to_tadasana =
+# 220923_Garland_Pose_or_Malasana_-a frames 389-541: 1.0s malasana-hold lead-in
+# + the 2.07s stand-up (annotation frames 419-481) + 2.0s standing tail. The
+# tail cut ENDS at the take's pose-distance minimum vs the tadasana node's
+# hold_ref (frame 541: pose_mean 0.176 — the arms rise again after; measured
+# 2026-07-10). NOTE the take never reaches tadasana's gate band (best 0.176 vs
+# theta 0.135; gap is ENTIRELY arms/hands 0.48-0.64m — the cross-take
+# "standing != standing" wound from the crow pilot, now measured pre-training).
+# Certificate arrivals are therefore expected ~0; the recovery oracle is the
+# operative success metric.
+#
+# Cloned from output/yoga_nodes_v2/malasana_lt_ampft/env_config.yaml (obs shape
+# IDENTICAL -> warm-start from malasana_lt_ampft/model.pt is legal) with:
+# motion_file / ground_offset (baked at trim: +0.0630, matches the node datum
+# 0.0634) / init_time_range [0.0, 3.07] (lead-in + transition ONLY, no tail
+# RSI) / the user-directed aux pack below.
+#
+# AUX PACK (user-directed 2026-07-10: "contacts, balance, contact surfaces";
+# all data-driven or phase-safe for THIS edge because the feet stay planted the
+# whole segment — the framework's anti-transit objection does not bite):
+#   contact-schedule 0.25  — phase-based demo schedule (feet loaded, hands
+#                            unloaded in both holds; transit don't-care).
+#                            0.5 was the anti-camp tier for the hard entry;
+#                            this exit-shaped edge gets the gentler tier.
+#   com_support     0.10   — CoM over the foot centroid (scale 100: gradient
+#                            alive at the 5-15cm scale; crow's 400 was for
+#                            cm-precision on palms). Valid ALL phases here:
+#                            a squat-to-stand keeps the CoM over the feet.
+#   flush_support   0.10   — load-weighted foot-sole contact-surface quality
+#                            vs the reference contact attitude (anti
+#                            edge-of-foot landing).
+#
+# Launch (150M first leg, weights-only warm start; ONE AMP job on the A5000):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/edge_malasana_to_tadasana_env.yaml \
+#     --agent_config data/agents/amp_smpl_transition_lowlr_agent.yaml \
+#     --model_file output/yoga_nodes_v2/malasana_lt_ampft/model.pt \
+#     --max_samples 150000000 --rand_seed 171 --master_port 29660
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0 # s; CLAMP clip 5.07s -> ~7s frozen-ref standing hold to timeout
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6 # m — divergence/failure radius (framework §3.1)
+    enable_phase_obs: False
+    num_disc_obs_steps: 10
+    enable_task_tracking: True
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    # TAKE-2 (2026-07-11, logged diagnosis): the REAL transition runs to ~5.0s —
+    # the human rises to a 60cm-wide stance at the mined boundary (3.07s), then
+    # STEPS the feet together 61->13cm over the "tail" (measured per-frame toe
+    # width + toe-lift oscillations). Take-1 (300M) tracked the mined window
+    # faithfully and delivered the 59cm straddle: takeover 0/128 (tadasana can't
+    # step). Fix = declare the window honestly: RSI extended into the step phase
+    # (exploration bridge into narrow-stance states) + contact schedule regenerated
+    # with tail_start 5.0 (a step momentarily unloads a foot; feet don't-care
+    # during 3.07-5.0). No new reward knobs.
+    init_time_range: [0.0, 4.5]   # lead-in + FULL transition incl. step-together
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # FALL set
+
+    motion_file: "data/motions/smpl_edges/malasana_to_tadasana"
+
+    auto_ground_offset: False
+    ground_offset: 0.0   # baked into the edge clip at trim time (make_edge_clips)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- user-directed aux pack (contacts / balance / contact surfaces) ---
+    reward_contact_schedule_w: 0.25
+    contact_schedule_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    contact_schedule_file: "data/motions/smpl_edges/malasana_to_tadasana.contact_schedule.npz"
+    contact_schedule_force_threshold: 5.0
+
+    reward_com_support_w: 0.1
+    reward_com_support_scale: 100.0
+    com_support_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+
+    reward_flush_support_w: 0.1
+    reward_flush_support_scale: 8.0
+    flush_support_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    flush_support_min_force: 10.0
+
+    # --- everything else OFF ---
+    reward_toe_force_pen_w: 0.0
+    reward_cop_support_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_toe_lift_w: 0.0
+    reward_inversion_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

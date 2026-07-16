@@ -1,0 +1,39 @@
+# PURE DeepMimic PPO agent with the HALVED learning rate (1.5e-5, not the PPO
+# default 3e-5), for hold-node configs that carry the sharp event-based
+# toe_force_pen (and other aux) terms. Rationale (Crow_pose.MD ft4 LR catch):
+# the per-step force penalty adds reward variance that the 3e-5 critic cannot
+# track -- crow ft4 diverged via a critic value-runaway at iter 66; halving the
+# LR cured it (grad_clip backfired). Same fix generalized here for the v2 yoga
+# hold nodes (tools/make_hold_nodes.py). Architecture identical to
+# deepmimic_smpl_ppo_agent.yaml. NaN-guard aborts cleanly on divergence ->
+# drop to 1e-5 next.
+agent_name: "PPO"
+
+model:
+  actor_net: "fc_2layers_1024units"
+  actor_init_output_scale: 0.01
+  actor_std_type: "FIXED"
+  action_std: 0.05
+
+  critic_net: "fc_2layers_1024units"
+
+optimizer:
+    type: "SGD"
+    learning_rate: 1.5e-5
+    grad_clip: 0.0
+
+discount: 0.99
+steps_per_iter: 32
+iters_per_output: 100
+test_episodes: 32
+normalizer_samples: 100000000
+
+update_epochs: 5
+batch_size: 4
+td_lambda: 0.95
+ppo_clip_ratio: 0.2
+norm_adv_clip: 4.0
+action_bound_weight: 10.0
+action_entropy_weight: 0.0
+action_reg_weight: 0.0
+critic_loss_weight: 1.0

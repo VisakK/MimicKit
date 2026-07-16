@@ -34,6 +34,21 @@ class DeepMimicEnv(char_env.CharEnv):
                    and 0.0 <= self._init_time_range[0] < self._init_time_range[1]), \
                 "init_time_range must be [t0, t1] seconds with 0 <= t0 < t1"
 
+        # Co-adaptation (B1, yoga_flow_paper_plan.md handoff model; config-gated,
+        # default OFF): a fraction `init_states_frac` of resets draw a harvested
+        # edge-ARRIVAL state (full dynamic state) instead of a clip-RSI frame, with
+        # the motion clock retargeted to the hold phase so tar-obs / pose-term track
+        # the node's canonical pose. The node thus learns to HOLD the (off-manifold)
+        # poses that real edges deliver into it.
+        self._init_states_file = env_config.get("init_states_file", None)
+        self._init_states_frac = env_config.get("init_states_frac", 0.0)
+        self._init_states = None
+        if (self._init_states_file is not None and self._init_states_frac > 0.0):
+            _blob = torch.load(self._init_states_file, map_location=device)
+            self._init_states = {k: _blob[k].to(device) for k in
+                                 ["root_pos", "root_rot", "root_vel", "root_ang_vel",
+                                  "dof_pos", "dof_vel", "motion_time"]}
+
         # Whole-clip ground offset for the reference motion (see MotionLib).
         # Off by default; lifts clips whose collision geometry penetrates the
         # ground so reference-state-init does not fire depenetration impulses.
@@ -126,6 +141,25 @@ class DeepMimicEnv(char_env.CharEnv):
         # regime -- to produce a usable gradient.
         self._com_support_forward_offset = env_config.get("com_support_forward_offset", 0.0)
         self._com_support_left_offset = env_config.get("com_support_left_offset", 0.0)
+
+        # COM-TRAJECTORY TRACKING reward (set weight to 0 to disable; edge
+        # framework v3, built 2026-07-11 for the malasana->tadasana step-in).
+        # Unlike com_support (pull COM to the STATIC centroid of listed bodies
+        # — during a weight shift the two-feet centroid is exactly the WRONG
+        # target), this term tracks the REFERENCE's own COM trajectory:
+        #   d = COM_xy - anchor_xy, rotated into the heading frame,
+        # computed identically for the sim character and the reference pose at
+        # the same motion time; reward = w * exp(-scale * ||d_char - d_ref||^2).
+        # Data-driven and phase-correct by construction: when the demo parks
+        # its COM over one foot before a step, matching d IS the anticipatory
+        # weight shift; during holds it degenerates to com_support-like
+        # centering. Anchor = centroid of com_tracking_anchor_bodies (use the
+        # support units, e.g. ankles+toes). Heading/translation invariant.
+        # Scale note: the demonstrated shift is 10-15cm, so ~100 gives a live
+        # gradient over that range (default 10 is inert, the com_support lesson).
+        self._reward_com_tracking_w = env_config.get("reward_com_tracking_w", 0.0)
+        self._reward_com_tracking_scale = env_config.get("reward_com_tracking_scale", 100.0)
+        self._com_tracking_anchor_bodies = env_config.get("com_tracking_anchor_bodies", [])
 
         # Contact-force balance reward (set weight to 0 to disable). Adds
         # reward_force_balance_w * exp(-reward_force_balance_scale * c), where
@@ -242,6 +276,93 @@ class DeepMimicEnv(char_env.CharEnv):
         self._toe_lift_min_h = env_config.get("toe_lift_min_h", 0.10)
         self._toe_lift_ref_h = env_config.get("toe_lift_ref_h", 0.12)
         self._toe_lift_bodies = env_config.get("toe_lift_bodies", [])
+
+        # CONTACT-SCHEDULE matching (yaml-gated, default OFF; edge framework v3
+        # §2.1 "data-driven channel"). Rewards agreement between the character's
+        # actual ground-contact SET and the DEMO's per-frame contact set at the
+        # same motion time, read from a precomputed schedule file
+        # (tools/make_contact_schedule.py — the Stage-1 annotator's witness-
+        # geometry contact rule, per-frame-lowest-geom + eps; body-ORIGIN height
+        # thresholds cannot separate e.g. a planted toe from crow's low tucked
+        # toe, measured 2026-07-10). Phase-correct by construction — the target
+        # follows each env's reference clock, so it prices the transit contact
+        # TIMING (tadasana->crow: hands must load and feet must lift exactly
+        # when the demo's do), which static contact terms cannot express. Added
+        # for the edge survival-camp failure (policy parks in a stable crouch
+        # instead of loading the hands — Yoga_edge_framework_v3.md §10).
+        # reward = reward_contact_schedule_w * mean_b 1[actual_b == target_b].
+        # Single-motion envs only (the edge envs); asserts if the lib has more.
+        self._reward_contact_schedule_w = env_config.get("reward_contact_schedule_w", 0.0)
+        self._contact_schedule_bodies = env_config.get("contact_schedule_bodies", [])
+        self._contact_schedule_file = env_config.get("contact_schedule_file", "")
+        self._contact_schedule_force_threshold = env_config.get("contact_schedule_force_threshold", 5.0)
+        # SWING-CLEARANCE channel (yaml-gated, default OFF; added 2026-07-11
+        # after the malasana->tadasana ft shuffled its feet together instead of
+        # stepping — measured 0.0-0.3cm policy clearance vs the demo's 5-8cm
+        # lifts). The unload test alone (force < threshold) is satisfied by a
+        # light DRAG; every force-based term shares this blind spot. During
+        # swing-marked frames (flag == 0) this channel additionally rewards the
+        # swing body matching the REFERENCE body's own height — the demo's
+        # clearance profile is the target (data-driven, no hand threshold).
+        # One-sided: only the SHORTFALL below (ref_z - slack) is penalized;
+        # swinging higher than the demo is free. Slack absorbs the baked-clip
+        # retarget float (~3.7cm on this corpus' standing tails). Frames with
+        # no swing-marked bodies pay full reward (non-perturbing elsewhere).
+        self._contact_schedule_swing_clear_w = env_config.get("contact_schedule_swing_clear_w", 0.0)
+        self._contact_schedule_swing_clear_scale = env_config.get("contact_schedule_swing_clear_scale", 500.0)
+        self._contact_schedule_swing_clear_slack = env_config.get("contact_schedule_swing_clear_slack", 0.03)
+        # Clearance applies ONLY to these schedule bodies (the stepping feet).
+        # Other bodies carry flag 0 as "forbidden contact" (e.g. hands in the
+        # holds), where a height target is meaningless.
+        swing_clear_bodies = env_config.get("contact_schedule_swing_clear_bodies", [])
+        self._cs_swing_clear_cols = [i for i, b in enumerate(self._contact_schedule_bodies)
+                                     if b in swing_clear_bodies]
+
+        # CONTACT-MOTION reward (yaml-gated, default OFF; designed 2026-07-11
+        # with the user — the third axis of the contact triad: schedule =
+        # when/where contact exists, com_tracking = how mass moves over
+        # support, THIS = how the LIMB travels through make and break).
+        # ONE term, ONE weight; every target comes from the reference;
+        # phase-gated by the event schedule's own transitions so it is inert
+        # away from contact changes. Per listed body, active during its swing
+        # (flag==0) and for make_window_s after touchdown:
+        #   xy: banded error vs the reference's foot-relative-to-SUPPORT
+        #       position in the heading frame (support = the anchor bodies the
+        #       REF schedule marks planted at that frame). The band leaves
+        #       room for embodiment-specific stance adaptation — different
+        #       limb lengths may legitimately place differently.
+        #   z (swing only): one-sided shortfall below the reference's own
+        #       lift profile (slack absorbs the baked-clip retarget float) —
+        #       subsumes contact_schedule_swing_clear (leave that at 0).
+        #   touchdown (make window only): downward-speed CAP (physics-
+        #       inspired soft landing; a demo-matched touchdown velocity
+        #       would chase retarget noise exactly where it is worst).
+        # r = exp(-scale * mean active err^2); frames with nothing active pay
+        # full reward (non-perturbing outside transitions).
+        self._reward_contact_motion_w = env_config.get("reward_contact_motion_w", 0.0)
+        self._contact_motion_bodies = env_config.get("contact_motion_bodies", [])
+        self._contact_motion_anchor_bodies = env_config.get("contact_motion_anchor_bodies", [])
+        self._contact_motion_scale = env_config.get("contact_motion_scale", 100.0)
+        self._contact_motion_xy_band = env_config.get("contact_motion_xy_band", 0.05)
+        self._contact_motion_z_slack = env_config.get("contact_motion_z_slack", 0.03)
+        self._contact_motion_land_speed_cap = env_config.get("contact_motion_land_speed_cap", 0.25)
+        self._contact_motion_make_window_s = env_config.get("contact_motion_make_window_s", 0.3)
+        # NO-SKATE channel (added 2026-07-11 after the scale-500 round: the
+        # term fired correctly in the swing windows, but the policy narrowed
+        # by SLIDING its LOADED feet during the planted phases at ~0.4 m/s —
+        # the planted flag only demands contact, and nothing anywhere priced
+        # horizontal motion of a foot that is IN contact. The demo's planted
+        # feet move < 0.05 m/s.) Whenever a listed body carries ground force,
+        # its horizontal speed beyond the slack is penalized — the "before/
+        # after" clause of the contact-motion principle: in contact ⇒ still.
+        # Not schedule-gated (it is a physical invariant, not a phase rule).
+        self._contact_motion_skate_slack = env_config.get("contact_motion_skate_slack", 0.05)
+        self._cm_cols = [i for i, b in enumerate(self._contact_schedule_bodies)
+                         if b in self._contact_motion_bodies]
+        self._cm_anchor_cols = [i for i, b in enumerate(self._contact_schedule_bodies)
+                                if b in self._contact_motion_anchor_bodies]
+        self._cm_masks = None   # lazy: (swing_mask, make_mask) [T, C] on device
+        self._contact_schedule_flags = None   # lazy-loaded [T, B] bool on device
 
         # Center-of-pressure support reward (set weight to 0 to disable; default
         # OFF). Adds reward_cop_support_w * exp(-reward_cop_support_scale * d^2),
@@ -447,6 +568,8 @@ class DeepMimicEnv(char_env.CharEnv):
         # terms (computed each step), so no reset bookkeeping is needed.
         com_support_bodies = self._com_support_bodies if self._reward_com_support_w > 0.0 else []
         self._com_support_body_ids = self._build_body_ids_tensor(com_support_bodies)
+        com_tracking_anchors = self._com_tracking_anchor_bodies if self._reward_com_tracking_w > 0.0 else []
+        self._com_tracking_anchor_ids = self._build_body_ids_tensor(com_tracking_anchors)
         force_balance_bodies = self._force_balance_bodies if self._reward_force_balance_w > 0.0 else []
         self._force_balance_body_ids = self._build_body_ids_tensor(force_balance_bodies)
         foot_clear_bodies = self._foot_clear_bodies if self._reward_foot_clear_w > 0.0 else []
@@ -465,6 +588,9 @@ class DeepMimicEnv(char_env.CharEnv):
         self._orient_body_ids = self._build_body_ids_tensor(orient_bodies)
         toe_lift_bodies = self._toe_lift_bodies if self._reward_toe_lift_w > 0.0 else []
         self._toe_lift_body_ids = self._build_body_ids_tensor(toe_lift_bodies)
+
+        cs_bodies = self._contact_schedule_bodies if self._reward_contact_schedule_w > 0.0 else []
+        self._contact_schedule_body_ids = self._build_body_ids_tensor(cs_bodies)
         cop_bodies = self._cop_bodies if self._reward_cop_support_w > 0.0 else []
         self._cop_body_ids = self._build_body_ids_tensor(cop_bodies)
         cop_support_bodies = self._cop_support_bodies if self._reward_cop_support_w > 0.0 else []
@@ -575,6 +701,9 @@ class DeepMimicEnv(char_env.CharEnv):
         self._reset_ref_motion(env_ids)
         self._ref_state_init(env_ids)
 
+        if (self._init_states is not None):
+            self._inject_init_states(env_ids)
+
         if (self._enable_ref_char()):
             self._reset_ref_char(env_ids)
 
@@ -657,6 +786,49 @@ class DeepMimicEnv(char_env.CharEnv):
         self._engine.set_body_vel(env_ids, char_id, 0.0)
         self._engine.set_body_ang_vel(env_ids, char_id, 0.0)
 
+        return
+
+    def _inject_init_states(self, env_ids):
+        """Co-adaptation (B1): overwrite a random `init_states_frac` of just-reset
+        envs with harvested edge-ARRIVAL states, retargeting the motion clock to the
+        hold phase (from each state's stored motion_time) so tar-obs / pose-term
+        track the node's canonical pose. Mirrors the takeover-oracle injection."""
+        n = len(env_ids)
+        use = torch.rand(n, device=self._device) < self._init_states_frac
+        if (not bool(use.any())):
+            return
+        inj = env_ids[use]
+        m = int(use.sum())
+        num_states = self._init_states["dof_pos"].shape[0]
+        pick = torch.randint(0, num_states, (m,), device=self._device)
+        st = {k: v[pick] for k, v in self._init_states.items()}
+        mids = torch.zeros(m, dtype=torch.long, device=self._device)
+
+        self._motion_ids[inj] = mids
+        self._motion_time_offsets[inj] = st["motion_time"]
+        rp, rr, rv, rav, jr, dv = self._motion_lib.calc_motion_frame(mids, st["motion_time"])
+        self._ref_root_pos[inj] = rp
+        self._ref_root_rot[inj] = rr
+        self._ref_root_vel[inj] = rv
+        self._ref_root_ang_vel[inj] = rav
+        self._ref_joint_rot[inj] = jr
+        self._ref_dof_vel[inj] = dv
+        ref_body_pos, ref_body_rot = self._kin_char_model.forward_kinematics(
+            self._ref_root_pos, self._ref_root_rot, self._ref_joint_rot)
+        self._ref_body_pos[:] = ref_body_pos
+        self._ref_body_rot[:] = ref_body_rot
+        self._ref_dof_pos[inj] = self._motion_lib.joint_rot_to_dof(jr)
+
+        cid = self._get_char_id()
+        e = self._engine
+        e.set_root_pos(inj, cid, st["root_pos"])
+        e.set_root_rot(inj, cid, st["root_rot"])
+        e.set_root_vel(inj, cid, st["root_vel"])
+        e.set_root_ang_vel(inj, cid, st["root_ang_vel"])
+        e.set_dof_pos(inj, cid, st["dof_pos"])
+        e.set_dof_vel(inj, cid, st["dof_vel"])
+        e.set_body_vel(inj, cid, 0.0)
+        e.set_body_ang_vel(inj, cid, 0.0)
         return
 
     def _get_motion_times(self, env_ids=None):
@@ -1081,7 +1253,8 @@ class DeepMimicEnv(char_env.CharEnv):
                    or (self._reward_cop_support_w > 0.0 and self._cop_body_ids.shape[0] > 0) \
                    or (self._reward_toe_force_pen_w > 0.0 and self._toe_force_pen_body_ids.shape[0] > 0) \
                    or (self._reward_knee_force_w > 0.0 and self._knee_force_body_ids.shape[0] > 0) \
-                   or (self._reward_flush_support_w > 0.0 and self._flush_support_body_ids.shape[0] > 0)
+                   or (self._reward_flush_support_w > 0.0 and self._flush_support_body_ids.shape[0] > 0) \
+                   or (self._reward_contact_schedule_w > 0.0 and self._contact_schedule_body_ids.shape[0] > 0)
         if (need_gcf):
             ground_contact_forces = self._engine.get_ground_contact_forces(char_id)
 
@@ -1108,6 +1281,12 @@ class DeepMimicEnv(char_env.CharEnv):
             reward_components["com_support_offset"] = com_offset
             reward_components["com_support_r"] = com_support_r
 
+        if (self._reward_com_tracking_w > 0.0 and self._com_tracking_anchor_ids.shape[0] > 0):
+            self._reward_buf[:], com_track_err, com_tracking_r = self._apply_com_tracking_reward(
+                self._reward_buf, body_pos)
+            reward_components["com_track_err"] = com_track_err
+            reward_components["com_tracking_r"] = com_tracking_r
+
         if (self._reward_force_balance_w > 0.0 and self._force_balance_body_ids.shape[0] > 0):
             self._reward_buf[:], fb_cost, force_balance_r = self._apply_force_balance_reward(
                 self._reward_buf, ground_contact_forces)
@@ -1118,6 +1297,19 @@ class DeepMimicEnv(char_env.CharEnv):
             self._reward_buf[:], foot_clear_r = self._apply_foot_clear_reward(
                 self._reward_buf, ground_contact_forces)
             reward_components["foot_clear_r"] = foot_clear_r
+
+        if (self._reward_contact_schedule_w > 0.0 and self._contact_schedule_body_ids.shape[0] > 0):
+            self._reward_buf[:], cs_agree, contact_schedule_r = self._apply_contact_schedule_reward(
+                self._reward_buf, ground_contact_forces)
+            reward_components["contact_schedule_agree"] = cs_agree
+            reward_components["contact_schedule_r"] = contact_schedule_r
+
+        if (self._reward_contact_motion_w > 0.0 and len(self._cm_cols) > 0
+                and self._contact_schedule_body_ids.shape[0] > 0):
+            self._reward_buf[:], cm_err, contact_motion_r = self._apply_contact_motion_reward(
+                self._reward_buf, body_pos)
+            reward_components["contact_motion_err"] = cm_err
+            reward_components["contact_motion_r"] = contact_motion_r
 
         if (self._reward_knee_support_w > 0.0 and self._knee_support_body_ids.shape[0] > 0
                 and self._knee_support_target_ids.shape[0] > 0):
@@ -1320,6 +1512,29 @@ class DeepMimicEnv(char_env.CharEnv):
         com_offset = torch.sqrt(offset_sq.clamp(min=0.0))
         return reward_buf + self._reward_com_support_w * com_support_r, com_offset, com_support_r
 
+    def _apply_com_tracking_reward(self, reward_buf, body_pos):
+        # Track the REFERENCE's COM-relative-to-anchor trajectory in the
+        # heading frame (see the config comment). Returns (new_reward,
+        # err_meters, com_tracking_r) for the reward-term tracker.
+        ids = self._com_tracking_anchor_ids
+        root_rot = self._engine.get_root_rot(self._get_char_id())
+
+        def rel_com_xy(bp, rr):
+            com = torch.einsum("nbk,b->nk", bp, self._com_body_weights)
+            anchor = bp[:, ids, :2].mean(dim=1)
+            d = com[:, :2] - anchor
+            hq_inv = torch_util.calc_heading_quat_inv(rr)
+            d3 = torch.cat([d, torch.zeros_like(d[:, :1])], dim=-1)
+            return torch_util.quat_rotate(hq_inv, d3)[:, :2]
+
+        d_char = rel_com_xy(body_pos, root_rot)
+        d_ref = rel_com_xy(self._ref_body_pos, self._ref_root_rot)
+        err_sq = torch.sum((d_char - d_ref) ** 2, dim=-1)
+        com_tracking_r = torch.exp(-self._reward_com_tracking_scale * err_sq)
+        com_track_err = torch.sqrt(err_sq.clamp(min=0.0))
+        return (reward_buf + self._reward_com_tracking_w * com_tracking_r,
+                com_track_err, com_tracking_r)
+
     def _apply_force_balance_reward(self, reward_buf, ground_contact_forces):
         # Penalize the sum of squared contact-force magnitudes over the listed
         # bodies, normalized by body weight squared so the cost is
@@ -1397,6 +1612,153 @@ class DeepMimicEnv(char_env.CharEnv):
         leg_straight_r = (1.0 - cos) / 2.0
         knee_angle = torch.rad2deg(torch.acos(cos.clamp(-1.0, 1.0)))
         return reward_buf + self._reward_leg_straight_w * leg_straight_r, knee_angle, leg_straight_r
+
+    def _ensure_contact_schedule(self):
+        if (self._contact_schedule_flags is not None):
+            return
+        import numpy as _np
+        blob = _np.load(self._contact_schedule_file, allow_pickle=True)
+        sched_bodies = [str(b) for b in blob["bodies"].tolist()]
+        assert sched_bodies == list(self._contact_schedule_bodies), \
+            "contact_schedule_file bodies {} != contact_schedule_bodies {}".format(
+                sched_bodies, self._contact_schedule_bodies)
+        assert int(self._motion_lib._motion_lengths.shape[0]) == 1, \
+            "contact_schedule supports single-motion (edge) envs only"
+        self._contact_schedule_flags = torch.tensor(
+            blob["flags"], dtype=torch.int8, device=self._device)    # [T, B] in {1,0,-1}
+        self._contact_schedule_fps = float(blob["fps"])
+        return
+
+    def _apply_contact_schedule_reward(self, reward_buf, ground_contact_forces):
+        # Data-driven contact-timing reward (edge framework v3): target contact
+        # flags come from the demo's precomputed per-frame contact schedule,
+        # indexed at each env's motion time (clamped at the clip end, matching
+        # the CLAMP reference). Actual flags from GRF. Pays the mean per-body
+        # agreement — a stable crouch with feet planted while the demo balances
+        # on its hands scores ~0 on the mismatched bodies, pricing the survival
+        # camp that tracking + disc + survival income admit. Returns
+        # (new_reward, mean_agreement, contact_schedule_r) for the tracker.
+        self._ensure_contact_schedule()
+        ids = self._contact_schedule_body_ids
+        t = self._get_motion_times()
+        idx = torch.clamp((t * self._contact_schedule_fps).round().long(),
+                          0, self._contact_schedule_flags.shape[0] - 1)
+        target = self._contact_schedule_flags[idx]                         # [N, B] int8
+        cared = (target >= 0)
+        f = torch.linalg.vector_norm(ground_contact_forces[:, ids, :], dim=-1)
+        actual = (f > self._contact_schedule_force_threshold).to(torch.int8)  # [N, B]
+        match = ((target == actual) & cared).float().sum(dim=-1)
+        n_cared = cared.float().sum(dim=-1)
+        # frames with no constrained bodies (the transit window) pay full
+        # reward — the term must not perturb the unconstrained phase.
+        agree = torch.where(n_cared > 0, match / torch.clamp(n_cared, min=1.0),
+                            torch.ones_like(match))                       # [N]
+        contact_schedule_r = self._reward_contact_schedule_w * agree
+        reward_buf += contact_schedule_r
+        if (self._contact_schedule_swing_clear_w > 0.0 and len(self._cs_swing_clear_cols) > 0):
+            # swing frames: match the reference body's own height (see config
+            # comment). One-sided shortfall below (ref_z - slack).
+            cols = self._cs_swing_clear_cols
+            body_pos = self._engine.get_body_pos(self._get_char_id())
+            z = body_pos[:, ids[cols], 2]                                 # [N, C]
+            ref_z = self._ref_body_pos[:, ids[cols], 2]
+            swing = (target[:, cols] == 0)
+            short = torch.clamp(ref_z - self._contact_schedule_swing_clear_slack - z,
+                                min=0.0)
+            short_sq = torch.where(swing, short * short, torch.zeros_like(short))
+            n_swing = swing.float().sum(dim=-1)
+            mean_short_sq = short_sq.sum(dim=-1) / torch.clamp(n_swing, min=1.0)
+            clear_r = torch.exp(-self._contact_schedule_swing_clear_scale * mean_short_sq)
+            clear_r = torch.where(n_swing > 0, clear_r, torch.ones_like(clear_r))
+            reward_buf += self._contact_schedule_swing_clear_w * clear_r
+            # fold into the returned diagnostics: agreement stays pure; the
+            # weighted channel total reflects both incomes.
+            contact_schedule_r = contact_schedule_r \
+                + self._contact_schedule_swing_clear_w * clear_r
+        return reward_buf, agree, contact_schedule_r
+
+    def _ensure_contact_motion_masks(self):
+        if (self._cm_masks is not None):
+            return
+        self._ensure_contact_schedule()
+        cols = self._cm_cols
+        flags = self._contact_schedule_flags[:, cols]              # [T, C]
+        swing = (flags == 0)
+        K = max(1, int(round(self._contact_motion_make_window_s
+                             * self._contact_schedule_fps)))
+        planted = (flags == 1)
+        recent_swing = torch.zeros_like(swing)
+        for k in range(1, K + 1):                                   # load-time only
+            recent_swing[k:] |= swing[:-k]
+        make = planted & recent_swing
+        self._cm_masks = (swing, make)
+        return
+
+    def _apply_contact_motion_reward(self, reward_buf, body_pos):
+        # The contact-motion term (see the config comment). Support-relative,
+        # heading-frame, phase-gated by the schedule's own transitions.
+        self._ensure_contact_motion_masks()
+        swing_mask, make_mask = self._cm_masks
+        ids_all = self._contact_schedule_body_ids
+        foot_ids = ids_all[self._cm_cols]
+        anchor_ids = ids_all[self._cm_anchor_cols]
+        t = self._get_motion_times()
+        idx = torch.clamp((t * self._contact_schedule_fps).round().long(),
+                          0, self._contact_schedule_flags.shape[0] - 1)
+        sw = swing_mask[idx]                                        # [N, C]
+        mk = make_mask[idx]
+        active = sw | mk
+        n_active = active.float().sum(dim=-1)
+
+        # support anchor = anchor bodies the REF schedule marks planted now;
+        # the same mask picks the anchor on both the char and the ref side.
+        anchor_planted = (self._contact_schedule_flags[:, self._cm_anchor_cols][idx] == 1)
+        a_w = anchor_planted.float()
+        a_n = torch.clamp(a_w.sum(dim=-1, keepdim=True), min=1.0)
+
+        def rel_xy(bp, rr):
+            a_xy = (bp[:, anchor_ids, :2] * a_w.unsqueeze(-1)).sum(dim=1) / a_n
+            d = bp[:, foot_ids, :2] - a_xy.unsqueeze(1)             # [N, C, 2]
+            hq_inv = torch_util.calc_heading_quat_inv(rr)
+            N, C = d.shape[0], d.shape[1]
+            d3 = torch.cat([d, torch.zeros_like(d[..., :1])], dim=-1).reshape(N * C, 3)
+            q = hq_inv.unsqueeze(1).expand(N, C, 4).reshape(N * C, 4)
+            return torch_util.quat_rotate(q, d3).reshape(N, C, 3)[..., :2]
+
+        char_rot = self._engine.get_root_rot(self._get_char_id())
+        d_char = rel_xy(body_pos, char_rot)
+        d_ref = rel_xy(self._ref_body_pos, self._ref_root_rot)
+        xy_short = torch.clamp(
+            torch.linalg.vector_norm(d_char - d_ref, dim=-1)
+            - self._contact_motion_xy_band, min=0.0)                # [N, C]
+        z_short = torch.clamp(
+            self._ref_body_pos[:, foot_ids, 2]
+            - self._contact_motion_z_slack
+            - body_pos[:, foot_ids, 2], min=0.0) * sw.float()
+        body_vel = self._engine.get_body_vel(self._get_char_id())
+        v_excess = torch.clamp(-body_vel[:, foot_ids, 2]
+                               - self._contact_motion_land_speed_cap,
+                               min=0.0) * mk.float()
+        err_sq = (xy_short * xy_short * active.float()
+                  + z_short * z_short + v_excess * v_excess)
+        mean_err_sq = err_sq.sum(dim=-1) / torch.clamp(n_active, min=1.0)
+        # no-skate: loaded body ⇒ stationary (see config comment). Active at
+        # ALL times, so it is averaged separately and added to the kernel.
+        grf = self._engine.get_ground_contact_forces(self._get_char_id())
+        loaded = (torch.linalg.vector_norm(grf[:, foot_ids, :], dim=-1)
+                  > self._contact_schedule_force_threshold) & ~mk
+        # (~mk: the make window is the settling grace period — a clean landing
+        # is loaded while still decelerating horizontally.)
+        skate = torch.clamp(
+            torch.linalg.vector_norm(body_vel[:, foot_ids, :2], dim=-1)
+            - self._contact_motion_skate_slack, min=0.0) * loaded.float()
+        n_loaded = loaded.float().sum(dim=-1)
+        skate_sq = (skate * skate).sum(dim=-1) / torch.clamp(n_loaded, min=1.0)
+        total_err_sq = mean_err_sq + skate_sq
+        r = torch.exp(-self._contact_motion_scale * total_err_sq)
+        r = torch.where((n_active > 0) | (n_loaded > 0), r, torch.ones_like(r))
+        err_m = torch.sqrt(total_err_sq.clamp(min=0.0))
+        return (reward_buf + self._reward_contact_motion_w * r, err_m, r)
 
     def _apply_toe_lift_reward(self, reward_buf, body_pos):
         # Height-based bonus for keeping BOTH toes clear of the floor during the

@@ -1,0 +1,143 @@
+# EDGE malasana -> tadasana — GENTLE FINETUNE of the pure-AMP base with the
+# NEW data-driven step-in terms (user-directed ladder, 2026-07-11; stage 2 of
+# the amponly ladder — see edge_malasana_to_tadasana_amponly_env.yaml).
+#
+# The two NEW terms (built for the diagnosed stance-close failure — the policy
+# delivered a 57cm straddle for 450M because the step-together is a risky
+# weight-shift skill no prior term priced phase-correctly):
+#   1. EVENT-BASED contact schedule (make_contact_schedule.py --events):
+#      per-frame flags from horizontal-foot-speed swing detection — REQUIRES
+#      breaking contact during the demo's two steps (R 2.87-3.33s, L 4.30-4.73s)
+#      and being planted otherwise. The stock 5cm height rule is blind here
+#      (retarget float 4-8cm); velocity is the robust indicator.
+#   2. COM-TRAJECTORY tracking (reward_com_tracking_w, new in deepmimic_env):
+#      matches the REFERENCE's COM-relative-to-feet trajectory in the heading
+#      frame — rewards the demo's anticipatory weight shifts (alpha 0.5->0.8
+#      before the R step, ->0.32 before the L step; 10-15cm COM excursions,
+#      scale 100 = live gradient at that range). com_support is OFF: its
+#      pull-to-centroid target is exactly WRONG during a weight shift.
+#
+# Agent = amp_smpl_hold_discfocus_agent.yaml (task 0.25 / disc 1.0, LR 1.5e-5)
+# per the validated v3 node ladder (AMP-only base -> gentle attributable delta).
+# RSI [0, 6.5]: covers both steps + 1.4s narrow stance; excludes the last
+# second (tail reward farm). pose_termination back ON (divergence radius).
+#
+# Launch (+200M, weights-only resume from the amponly base):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/edge_malasana_to_tadasana_ft_env.yaml \
+#     --agent_config data/agents/amp_smpl_hold_discfocus_agent.yaml \
+#     --model_file output/yoga_edges_v3/malasana_to_tadasana_amponly/model.pt \
+#     --max_samples 200000000 --rand_seed 179 --master_port 29674
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6
+    enable_phase_obs: False
+    num_disc_obs_steps: 10
+    enable_task_tracking: True
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 6.5]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # FALL set
+
+    motion_file: "data/motions/smpl_edges/malasana_to_tadasana_v2"
+
+    auto_ground_offset: False
+    ground_offset: 0.0   # baked at trim time
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- NEW data-driven step-in terms ---
+    reward_contact_schedule_w: 0.25
+    contact_schedule_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    contact_schedule_file: "data/motions/smpl_edges/malasana_to_tadasana_v2.contact_schedule.npz"
+    contact_schedule_force_threshold: 5.0
+    # swing-clearance channel OFF — SUBSUMED by contact_motion below (its z
+    # shortfall is the same one-sided clearance, now inside the unified term).
+    contact_schedule_swing_clear_w: 0.0
+
+    # CONTACT-MOTION term (user direction 2026-07-11: the triad's third axis —
+    # how the LIMB travels through make/break; round-1 ft dragged the feet at
+    # 0.0-0.3cm clearance because unload-only flags admit a drag). One weight;
+    # all position targets from the reference; banded xy (5cm free band =
+    # room for embodiment-specific stance adaptation), one-sided z vs the
+    # demo's own lift profile, landing-speed cap at touchdown; gated to the
+    # schedule's swing + 0.3s post-touchdown windows, inert elsewhere.
+    reward_contact_motion_w: 0.4
+    contact_motion_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    contact_motion_anchor_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    contact_motion_scale: 500.0   # 100 was inert: 5cm drag-shortfall cost ~1.6 return/ep (measured ft2 round: clearance still 0.2-0.4cm); 500 makes it ~9
+    contact_motion_xy_band: 0.05
+    contact_motion_z_slack: 0.03
+    contact_motion_land_speed_cap: 0.25
+    contact_motion_make_window_s: 0.3
+    # no-skate channel (2026-07-11, round-3 diagnosis: the policy narrowed by
+    # SLIDING its LOADED feet at ~0.4 m/s during planted phases — contact flags
+    # cannot see horizontal motion of a foot in contact; demo planted feet move
+    # <0.05 m/s). loaded => stationary; make-window exempt (landing grace).
+    contact_motion_skate_slack: 0.05
+
+    reward_com_tracking_w: 0.15
+    reward_com_tracking_scale: 100.0
+    com_tracking_anchor_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+
+    reward_flush_support_w: 0.1
+    reward_flush_support_scale: 8.0
+    flush_support_bodies: ["L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    flush_support_min_force: 10.0
+
+    # com_support OFF: superseded by com_tracking (centroid target fights the shift)
+    reward_com_support_w: 0.0
+
+    # --- everything else OFF ---
+    reward_toe_force_pen_w: 0.0
+    reward_cop_support_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_toe_lift_w: 0.0
+    reward_inversion_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

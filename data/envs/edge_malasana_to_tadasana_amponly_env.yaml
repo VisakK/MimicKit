@@ -1,0 +1,98 @@
+# EDGE malasana -> tadasana — PURE-AMP long-budget BASE (user-directed ladder,
+# 2026-07-11): "train AMP-only first, longer (600M) — check we give AMP enough
+# time to learn" (the handstand precedent: balance emerged ~300-330M, invisible
+# at every 200M budget). Then a gentle finetune adds the NEW data-driven terms
+# (event-based contact schedule + COM-trajectory tracking) — see the _ft_ env.
+#
+# Reference = malasana_to_tadasana_v2 (Garland_-a 389-631, 8.07s): 1s malasana
+# lead-in + 2.07s stand-up + the TWO step-together events (R 2.87-3.33s,
+# L 4.30-4.73s, measured by step_forensics) + 3.0s SETTLED NARROW STANCE
+# (11-13cm) — the v2 re-clip tests the "step was too close to the clip end"
+# hypothesis (v1 gave 0.34s of narrow-stance reference after the second step).
+#
+# AMP-only template diffs (crow/handstand amponly pattern): task tracking OFF,
+# pose_termination OFF, ALL reward weights 0 (reward = disc only). RSI spans
+# nearly the whole clip (no task reward -> no tail reward farm; wide RSI =
+# exposure to every phase incl. single-support and narrow stance).
+#
+# Launch (600M from scratch; agent amp_smpl_agent.yaml task 0 / disc 1, LR 3e-5):
+#   run.py --mode train --num_envs 4096 \
+#     --env_config data/envs/edge_malasana_to_tadasana_amponly_env.yaml \
+#     --agent_config data/agents/amp_smpl_agent.yaml \
+#     --max_samples 600000000 --rand_seed 177 --master_port 29672
+env_name: "amp"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0
+    global_obs: True
+    root_height_obs: True
+    # pose_termination ON — DEVIATION from the node-amponly template, logged
+    # diagnosis (2026-07-11): two abrupt NaN aborts (iter 401 scratch, iter 14
+    # resumed at half LR) with smooth losses + steady obs stats up to the
+    # break = a physics-blowup batch, not optimizer runaway. This is the only
+    # amponly run without the 0.6 divergence radius on a deep self-contacting
+    # squat; unterminated flailing reaches self-penetrating configs PhysX
+    # NaNs on. The radius bounds exploration away from blowup states.
+    pose_termination: True
+    pose_termination_dist: 0.6
+    enable_phase_obs: False
+    num_disc_obs_steps: 10
+    enable_task_tracking: False    # PURE AMP
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 7.5]
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Head", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # FALL set
+
+    motion_file: "data/motions/smpl_edges/malasana_to_tadasana_v2"
+
+    auto_ground_offset: False
+    ground_offset: 0.0   # baked at trim time
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    # --- AMP-only: every env reward term OFF ---
+    reward_pose_w: 0.0
+    reward_vel_w: 0.0
+    reward_root_pose_w: 0.0
+    reward_root_vel_w: 0.0
+    reward_key_pos_w: 0.0
+    reward_contact_schedule_w: 0.0
+    reward_com_tracking_w: 0.0
+    reward_com_support_w: 0.0
+    reward_flush_support_w: 0.0
+    reward_toe_force_pen_w: 0.0
+    reward_cop_support_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_toe_lift_w: 0.0
+    reward_inversion_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

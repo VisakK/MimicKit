@@ -1,0 +1,69 @@
+# Hybrid-AMP agent with the REGION-ATTENTION + CONTACT CROSS-ATTENTION encoder for
+# actor & critic (see Model_arch_redesign.MD). Cloned verbatim from
+# amp_smpl_transition_lowlr_agent.yaml (SGD, LR 1.5e-5, grad_clip 0, task 1.0 /
+# disc 1.0) EXCEPT actor_net/critic_net swapped to attn_region_contact and an attn
+# hyperparameter block added. The discriminator net is UNCHANGED (fc_2layers_1024units).
+#
+# Same optimizer/LR as the MLP crow-hold baseline (model_yoga_amp_crow_hold.pt) so
+# the only variable vs that run is the ENCODER ARCHITECTURE -- isolates the
+# attention encoder's effect. Pre-LN blocks for SGD stability; NaN-guard active.
+agent_name: "AMP"
+
+model:
+  actor_net: "attn_region_contact"
+  actor_init_output_scale: 0.01
+  actor_std_type: "FIXED"
+  action_std: 0.05
+
+  critic_net: "attn_region_contact"
+
+  disc_net: "fc_2layers_1024units"
+
+  # Region-attention encoder hyperparameters (shared by actor & critic builds).
+  attn:
+    d_model: 128
+    n_heads: 4
+    n_self_layers: 2     # region-masked self-attention over joints (upper/lower)
+    n_cross_layers: 2    # joint -> contact cross-attention
+    ffn: 256
+    decoder: [512, 256]  # pooled (2*d_model) -> ... -> 256 hidden out
+
+optimizer:
+    type: "SGD"
+    learning_rate: 1.5e-5
+    grad_clip: 0.0
+
+discount: 0.99
+steps_per_iter: 32
+iters_per_output: 100
+test_episodes: 32
+normalizer_samples: 100000000
+
+update_epochs: 5
+batch_size: 2   # PPO update minibatch = batch_size * num_envs = 2*4096 = 8192
+                # (halved from 4 to bound the attention encoder's update-step
+                # activation memory; keeps num_envs 4096 = the MLP-baseline regime)
+# Chunk the critic value-eval over the full rollout buffer (lines 103/118 in
+# ppo_agent). Default 0 = evaluate all T*N rows at once, which is fine for the
+# cheap MLP but OOMs the attention encoder's activations. Chunking is pure memory
+# management -- identical training math, just evaluated in pieces.
+critic_eval_batch_size: 8192
+td_lambda: 0.95
+ppo_clip_ratio: 0.2
+norm_adv_clip: 4.0
+action_bound_weight: 10.0
+action_entropy_weight: 0.0
+action_reg_weight: 0.0
+critic_loss_weight: 1.0
+
+disc_buffer_size: 200000
+disc_replay_samples: 1000
+disc_batch_size: 2048
+disc_loss_weight: 5
+disc_logit_reg: 0.01
+disc_grad_penalty: 5
+disc_weight_decay: 0.0001
+disc_reward_scale: 2
+
+task_reward_weight: 1.0
+disc_reward_weight: 1.0

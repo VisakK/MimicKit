@@ -1,0 +1,54 @@
+# DISC-FOCUSED hold agent (2026-07-03): identical to
+# amp_smpl_transition_lowlr_agent.yaml except task_reward_weight 1.0 -> 0.25.
+# Rationale (user direction after inspecting handstand_amp/scorpion_amp): at
+# task 1.0 / disc 1.0 the tracking+aux channel (~2.4/step) drowns the disc
+# (~<=2/step, accuracy pinned 0.97/1.0 all run) and the policy keeps the
+# finger-balance wrist stance the disc should discourage. Down-weighting the
+# WHOLE non-AMP channel (tracking + aux together -- task_reward_weight scales
+# the env reward as one) makes the discriminator the dominant gradient, rather
+# than adding yet another shaping term. LR stays 1.5e-5 (critic-safe with
+# toe_force_pen present, ft4 lesson).
+agent_name: "AMP"
+
+model:
+  actor_net: "fc_2layers_1024units"
+  actor_init_output_scale: 0.01
+  actor_std_type: "FIXED"
+  action_std: 0.05
+
+  critic_net: "fc_2layers_1024units"
+
+  disc_net: "fc_2layers_1024units"
+
+optimizer:
+    type: "SGD"
+    learning_rate: 1.5e-5
+    grad_clip: 0.0
+
+discount: 0.99
+steps_per_iter: 32
+iters_per_output: 100
+test_episodes: 32
+normalizer_samples: 100000000
+
+update_epochs: 5
+batch_size: 4
+td_lambda: 0.95
+ppo_clip_ratio: 0.2
+norm_adv_clip: 4.0
+action_bound_weight: 10.0
+action_entropy_weight: 0.0
+action_reg_weight: 0.0
+critic_loss_weight: 1.0
+
+disc_buffer_size: 200000
+disc_replay_samples: 1000
+disc_batch_size: 2048
+disc_loss_weight: 5
+disc_logit_reg: 0.01
+disc_grad_penalty: 5
+disc_weight_decay: 0.0001
+disc_reward_scale: 2
+
+task_reward_weight: 0.25
+disc_reward_weight: 1.0
