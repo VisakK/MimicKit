@@ -9,6 +9,13 @@ list of local repairs the LLM orchestrator tries when a flow seam fails.
 Regenerate whenever nodes/edges are trained: it reads on-disk status from the run dirs.
 Plain Python (no Isaac); backs up any existing graph.yaml.
 
+MERGE RULE (Yoga_orchestration_protocol.md §2.1): the job board (tools/job_board.py,
+bank_edge.py, repoint_node.py) is the single writer of live state — regeneration must
+never clobber it. For ids present in the existing graph, persisted board fields
+(status, dir/model, version, basin provenance, gate staleness, certs, terminals)
+OVERLAY the spec defaults; board-registered nodes/edges/flows unknown to the spec are
+carried over wholesale; on_disk is recomputed from the merged dir/model.
+
   env_isaaclab/bin/python mimickit/skillgraph/build_graph.py
 """
 import os
@@ -96,6 +103,53 @@ FLOW_SPEC = {
 
 ROLE_OF = {n[0]: n[2] for n in NODE_SPEC}
 
+# board-owned fields that survive regeneration (single-writer rule)
+PERSIST_EDGE = ("status", "dir", "model", "recovery_oracle", "note", "diagnosis",
+                "superseded_by", "last_cert")
+PERSIST_NODE = ("status", "dir", "model", "version", "basin_finetuned_from",
+                "gate_calibrated_on", "oracle_validity", "needs", "arrival_gate")
+
+
+def merge_persisted(fresh, existing_path):
+    """Overlay live board state from the existing graph onto the spec-built one."""
+    if not os.path.exists(existing_path):
+        return fresh
+    with open(existing_path) as fh:
+        old = yaml.safe_load(fh) or {}
+    carried, kept = [], 0
+    for kind, keys in (("nodes", PERSIST_NODE), ("edges", PERSIST_EDGE)):
+        old_by = {o["id"]: o for o in old.get(kind, []) if isinstance(o, dict)}
+        fresh_ids = set()
+        for f in fresh.get(kind, []):
+            fresh_ids.add(f["id"])
+            o = old_by.get(f["id"])
+            if not o:
+                continue
+            for k in keys:
+                if k in o and o[k] is not None:
+                    f[k] = o[k]
+                    kept += 1
+        for oid, o in old_by.items():
+            if oid not in fresh_ids:
+                fresh[kind].append(o)
+                carried.append(f"{kind[:-1]}:{oid}")
+    fresh_flows = {fl["id"] for fl in fresh.get("flows", [])}
+    for fl in old.get("flows", []):
+        if fl["id"] not in fresh_flows:
+            fresh["flows"].append(fl)
+            carried.append(f"flow:{fl['id']}")
+    # on_disk is DERIVED — recompute from the merged dir/model
+    for n in fresh["nodes"]:
+        n["on_disk"] = bool(n.get("dir") and os.path.exists(
+            os.path.join(n["dir"], n.get("model", "model.pt"))))
+    for e in fresh["edges"]:
+        e["on_disk"] = bool(e.get("dir") and e.get("model") and os.path.exists(
+            os.path.join(e["dir"], e["model"])))
+    print(f"merge: overlaid {kept} persisted board fields"
+          + (f"; carried board-only objects: {', '.join(carried)}"
+             if carried else ""))
+    return fresh
+
 
 def recovery_ladder(to_id):
     """The ORDERED local repairs the orchestrator tries when this arrival seam fails."""
@@ -174,6 +228,7 @@ def build():
         if not os.path.exists(bak):
             shutil.copy(out, bak)
             print(f"backed up existing graph -> {bak}")
+    graph = merge_persisted(graph, out)
     with open(out, "w") as fh:
         yaml.safe_dump(graph, fh, sort_keys=False, default_flow_style=False, width=100)
 

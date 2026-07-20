@@ -1,0 +1,85 @@
+# EDGE downdog -> tadasana (deep-pike -> STAND rise) — PURE DEEPMIMIC (plank_vinyasa exit, DECOMPOSED).
+# WHY THIS EDGE: the direct plank->tadasana FAILED t=0 (all 128 fell at the pike->stand rise — the
+# hands->feet weight-transfer against gravity). Root cause = demo COVERAGE (Kumbhakasana jackknifes up
+# without dwelling in the deep inverted-V) + wide RSI hiding the initiation. FIX (framework decompose +
+# THE LESSON): route the exit as plank->downdog->tadasana and train the hard rise from the BEST demo —
+# Downward-Facing_Dog_-a f628-689 (genuine deep 4-point downdog up_z -0.16 -> standing up_z 0.94, slow
+# 0.18 m/s, both feet grounded). CRITICAL: init_time_range caps at the transition end so RSI starts IN
+# the deep downdog (the exact stuck state) + covers the rise, NOT the standing tail (the curriculum-
+# optimism fix). downdog is a signed-off, gate-calibrated node -> certifiable waypoint.
+# Clip: transition [1.00,3.03]s, baked +0.0523 m (preflight PASS, worst pen 0.1 cm). Tracking reward ONLY.
+# Launch: agent deepmimic_smpl_ppo_agent.yaml, LR 3e-5, ~300M ceiling, early-kill, EVAL FROM t=0 (=downdog).
+env_name: "deepmimic"
+
+env:
+    char_file: "data/assets/smpl/smpl_boxhands_lowtorque.xml"
+    camera_mode: "track"
+
+    episode_length: 12.0
+    global_obs: True
+    root_height_obs: True
+    pose_termination: True
+    pose_termination_dist: 0.6
+    enable_phase_obs: False
+    enable_tar_obs: True
+    num_phase_encoding: 4
+    tar_obs_steps: [1, 2, 3]
+    rand_reset: True
+    init_time_range: [0.0, 3.0]   # RSI IN the deep downdog + the rise; NO standing-tail farming
+
+    ref_char_offset: [2.0, 0.0, 0.0] # m
+    init_pose: [0, 0, 0.9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.5708, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    enable_early_termination: True
+    key_bodies: ["L_Toe", "R_Toe", "Head", "L_Hand", "R_Hand"]
+    contact_bodies: ["Pelvis", "Torso", "Spine", "Chest", "Neck", "R_Shoulder", "L_Shoulder", "R_Thorax", "L_Thorax"] # FALL set (torso group; Head dropped — hangs low in the deep downdog)
+
+    motion_file: "data/motions/smpl_edges/downdog_to_tadasana"
+
+    auto_ground_offset: False
+    ground_offset: 0.0   # baked at trim time (+0.0523 m already in the clip)
+
+    enable_contact_obs: True
+    obs_contact_bodies: ["L_Wrist", "L_Hand", "R_Wrist", "R_Hand", "L_Ankle", "L_Toe", "R_Ankle", "R_Toe"]
+    obs_contact_force_threshold: 1.0 # N
+    obs_contact_margin_cap: 1.0 # m
+
+    joint_err_w: [2.0, 2.5, 0.6, 0.3, 2.0, 2.5, 0.6, 0.3, 1.0, 0.6, 0.6, 0.4, 0.4, 1.5, 2.0, 2.5, 3.0, 3.0, 1.5, 2.0, 2.5, 3.0, 3.0]
+
+    reward_pose_w: 0.5
+    reward_vel_w: 0.1
+    reward_root_pose_w: 0.5
+    reward_root_vel_w: 0.2
+    reward_key_pos_w: 0.5
+    reward_pose_scale: 0.25
+    reward_vel_scale: 0.01
+    reward_root_pose_scale: 5.0
+    reward_root_vel_scale: 1.0
+    reward_key_pos_scale: 10.0
+
+    # --- pure tracking: EVERYTHING else OFF ---
+    reward_contact_schedule_w: 0.0
+    reward_com_tracking_w: 0.0
+    reward_contact_motion_w: 0.0
+    reward_com_support_w: 0.0
+    reward_flush_support_w: 0.0
+    reward_toe_force_pen_w: 0.0
+    reward_cop_support_w: 0.0
+    reward_knee_support_w: 0.0
+    reward_toe_lift_w: 0.0
+    reward_inversion_w: 0.0
+    reward_force_balance_w: 0.0
+    reward_foot_clear_w: 0.0
+    reward_orient_w: 0.0
+    reward_energy_w: 0.0
+
+
+engine:
+    engine_name: "isaac_lab"
+
+    control_mode: "pos"
+    control_freq: 30
+    sim_freq: 120
+    env_spacing: 5
+
+    ground_contact_height: 0.3

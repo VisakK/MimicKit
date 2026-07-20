@@ -106,6 +106,14 @@ def main():
                         " (recovery mode only)")
     p.add_argument("--num_envs", type=int, default=256)
     p.add_argument("--max_states", type=int, default=6000)
+    p.add_argument("--vel_scale", type=float, default=1.0,
+                   help="scale injected velocities (the flow executor's node "
+                        "dwell damps to 0.0 = settle-and-hold; default keeps "
+                        "the stored velocities)")
+    p.add_argument("--save_end_states", default=None,
+                   help="write SURVIVING candidates' full end-of-hold states "
+                        "(hold_states-blob format) here — the post-dwell "
+                        "delivered distribution for chain certification")
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--master_port", type=int, default=29611)
     p.add_argument("--rand_seed", type=int, default=42)
@@ -126,6 +134,9 @@ def main():
     cand = {k: blob[k][sel] for k in ["root_pos", "root_rot", "root_vel",
                                       "root_ang_vel", "dof_pos", "dof_vel",
                                       "motion_time"]}
+    if args.vel_scale != 1.0:
+        for vk in ("root_vel", "root_ang_vel", "dof_vel"):
+            cand[vk] = cand[vk] * args.vel_scale
 
     device = args.device
     mp_util.init(0, 1, device, args.master_port)
@@ -169,6 +180,9 @@ def main():
 
     verdict = torch.zeros(K, dtype=torch.bool)
     t_fail = torch.full((K,), -1.0)
+    STATE_KEYS = ["root_pos", "root_rot", "root_vel", "root_ang_vel",
+                  "dof_pos", "dof_vel"]
+    end_batches = []
 
     n_batches = (K + N - 1) // N
     print(f"[oracle:{os.path.basename(node_dir)}] labeling {K} states "
@@ -222,6 +236,12 @@ def main():
             # but freeze bookkeeping if it ever does.
             if bool((done == FAIL).all()):
                 break
+        if args.save_end_states is not None:
+            # end-of-hold states for THIS batch's candidate slots (survivor
+            # filtering happens at save time via the final verdict)
+            end_batches.append(
+                {k: getattr(env._engine, "get_" + k)(cid)[:nb].detach().cpu().clone()
+                 for k in STATE_KEYS})
         ok = ~failed
         if hold_ref is not None and end_n > 0:
             end_pd /= end_n; end_upz /= end_n
@@ -236,6 +256,16 @@ def main():
            "hold_seconds": args.hold_seconds, "node_dir": node_dir,
            "states_file": args.states}
     torch.save(out, out_path)
+
+    if args.save_end_states is not None:
+        cat = {k: torch.cat([b[k] for b in end_batches]) for k in STATE_KEYS}
+        end = {k: cat[k][verdict] for k in STATE_KEYS}
+        # motion clock: keep the injected hold time (a held state in the node's
+        # basin at that time; chained consumers re-stamp their own clock)
+        end["motion_time"] = cand["motion_time"][verdict].clone()
+        torch.save(end, args.save_end_states)
+        print(f"[oracle] saved {int(verdict.sum())}/{K} end-of-hold survivor "
+              f"states -> {args.save_end_states}", flush=True)
 
     # summary splits (if the blob carries harvest labels)
     msg = f"[oracle:{os.path.basename(node_dir)}] overall pass {float(verdict.float().mean()):.3f}"

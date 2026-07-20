@@ -1,22 +1,18 @@
-# Flow C — downdog3L->handstand AMP RETRAIN env (yoga_flow_paper_plan.md §10; recipe (a) DEFAULT).
-# The deepmimic edge delivers a FINGERTIP handstand (survival-tradeoff); AMP forces the natural manifold.
-# Recipe (a) = disc-dominant HYBRID: env_name amp + KEEP the tracking reward weights here, and pair with
-# agent data/agents/amp_smpl_hold_discfocus_agent.yaml (task ~0.25 / disc 1.0) so the light task drives
-# the kick-up phase-progress while the disc owns the hold style. pose_termination ON (amponly NaN fix).
-# SWAP for recipe (b) pure-AMP (agent amp_smpl_lowlr, all reward_*_w 0) or (c) warm-start the handstand
-# node output/yoga_nodes_v2/handstand_lt_amponly/model.pt (check obs parity). Recipe choice OPEN (§11).
+# B1 co-adaptation finetune of the handstand node (R2b_handoff_seam else-branch,
+# 2026-07-18): = handstand_lt_ampft env + init_states_file (gate-fire arrivals of
+# downdog3L_to_handstand_ampretrain) + init_states_frac 0.5. pose_termination stays
+# False (node base). Warm-start the handstand node model, 100M.
 env_name: amp
 env:
-  num_disc_obs_steps: 10       # disc history window (required by AMPEnv)
-  enable_task_tracking: true   # hybrid switch: task reward = DeepMimic tracking + aux
   char_file: data/assets/smpl/smpl_boxhands_lowtorque.xml
   camera_mode: track
   episode_length: 12.0
   global_obs: true
   root_height_obs: true
-  pose_termination: true
-  pose_termination_dist: 0.6
+  pose_termination: false
   enable_phase_obs: false
+  num_disc_obs_steps: 10
+  enable_task_tracking: true
   enable_tar_obs: true
   num_phase_encoding: 4
   tar_obs_steps:
@@ -26,7 +22,7 @@ env:
   rand_reset: true
   init_time_range:
   - 0.0
-  - 4.1
+  - 2.39
   ref_char_offset:
   - 2.0
   - 0.0
@@ -125,9 +121,9 @@ env:
   - L_Shoulder
   - R_Thorax
   - L_Thorax
-  motion_file: data/motions/smpl_edges/downdog3L_to_handstand
+  motion_file: data/motions/smpl_holds/handstand_hold
   auto_ground_offset: false
-  ground_offset: 0.0
+  ground_offset: 0.0349
   enable_contact_obs: true
   obs_contact_bodies:
   - L_Wrist
@@ -174,20 +170,43 @@ env:
   reward_root_pose_scale: 5.0
   reward_root_vel_scale: 1.0
   reward_key_pos_scale: 10.0
-  reward_contact_schedule_w: 0.0
-  reward_com_tracking_w: 0.0
-  reward_contact_motion_w: 0.0
-  reward_com_support_w: 0.0
-  reward_flush_support_w: 0.0
-  reward_toe_force_pen_w: 0.0
-  reward_cop_support_w: 0.0
-  reward_knee_support_w: 0.0
-  reward_toe_lift_w: 0.0
+  reward_toe_force_pen_w: 0.25
+  toe_force_pen_cap: 30.0
+  toe_force_pen_ref_h: 0.12
+  toe_force_pen_bodies:
+  - L_Toe
+  - R_Toe
+  - L_Ankle
+  - R_Ankle
+  reward_cop_support_w: 0.25
+  reward_cop_support_scale: 10.0
+  cop_support_forward_offset: 0.04
+  cop_min_force: 10.0
+  cop_bodies:
+  - L_Ankle
+  - L_Hand
+  - L_Toe
+  - R_Ankle
+  - R_Hand
+  - R_Toe
+  cop_support_bodies:
+  - L_Hand
+  - R_Hand
   reward_inversion_w: 0.0
+  inversion_up_threshold: -0.5
+  inversion_force_threshold: 5.0
+  inversion_bonus_bodies:
+  - L_Hand
+  - R_Hand
+  reward_toe_lift_w: 0.0
+  reward_com_support_w: 0.0
   reward_force_balance_w: 0.0
   reward_foot_clear_w: 0.0
   reward_orient_w: 0.0
   reward_energy_w: 0.0
+  reward_energy_scale: 0.001
+  init_states_file: output/yoga_edges_v3/downdog3L_to_handstand_ampretrain/gatefire_arrivals.pt
+  init_states_frac: 0.5
 engine:
   engine_name: isaac_lab
   control_mode: pos
